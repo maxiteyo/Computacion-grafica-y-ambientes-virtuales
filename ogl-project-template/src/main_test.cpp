@@ -1,8 +1,9 @@
 // ============================================================================
-// main_test.cpp — Test del módulo ResourceManager (C++ puro, sin OpenGL).
+// main_test.cpp — Tests de ResourceManager y primitives (C++ puro, sin OpenGL).
 //
-// Compilación:
-//   g++ -std=c++17 -Wall -Wextra ResourceManager.cpp main_test.cpp -o test_rm
+// Compilación (desde la raíz del proyecto):
+//   g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp
+//       src/core/ResourceManager.cpp src/main_test.cpp -o test_rm
 //
 // Ejecución (desde la raíz del proyecto):
 //   ./test_rm
