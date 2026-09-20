@@ -72,13 +72,16 @@ void Mesh::load(const MeshData& data)
     // Si ya había algo subido, soltarlo antes de crear los objetos nuevos.
     clear();
 
-    // Ancho de un vértice y desplazamientos de cada atributo, calculados (no
-    // hardcodeados a 0 y 12) para no tener que tocarlos si la tupla cambia.
+    // Ancho de un vértice y desplazamientos de cada atributo, calculados con
+    // offsetof (no hardcodeados a 0/12/24) para no tener que tocarlos si la
+    // tupla cambia.
     const GLsizei stride =
         static_cast<GLsizei>(sizeof(Vertex));
 
-    const GLint off_color =
-        static_cast<GLint>(offsetof(Vertex, r));
+    const GLint off_normal =
+        static_cast<GLint>(offsetof(Vertex, normal));
+    const GLint off_tex =
+        static_cast<GLint>(offsetof(Vertex, tex_coords));
 
     // VBO: subimos la lista de vértices completa (entrelazada).
     glCreateBuffers(1, &vbo_);
@@ -105,15 +108,20 @@ void Mesh::load(const MeshData& data)
         glVertexArrayElementBuffer(vao_, ebo_);
     }
 
-    // Atributo 0: posición (3 floats).
+    // Atributo 0: posición (3 floats), a partir del byte 0.
     glVertexArrayAttribFormat(vao_, 0, 3, GL_FLOAT, GL_FALSE, 0);
     glVertexArrayAttribBinding(vao_, 0, 0);
     glEnableVertexArrayAttrib(vao_, 0);
 
-    // Atributo 1: color (3 floats), a partir de off_color bytes.
-    glVertexArrayAttribFormat(vao_, 1, 3, GL_FLOAT, GL_FALSE, off_color);
+    // Atributo 1: normal (3 floats), a partir de off_normal bytes.
+    glVertexArrayAttribFormat(vao_, 1, 3, GL_FLOAT, GL_FALSE, off_normal);
     glVertexArrayAttribBinding(vao_, 1, 0);
     glEnableVertexArrayAttrib(vao_, 1);
+
+    // Atributo 2: coordenadas de textura (2 floats), a partir de off_tex bytes.
+    glVertexArrayAttribFormat(vao_, 2, 2, GL_FLOAT, GL_FALSE, off_tex);
+    glVertexArrayAttribBinding(vao_, 2, 0);
+    glEnableVertexArrayAttrib(vao_, 2);
 
     // count_ guarda la cantidad de ÍNDICES (lo que necesita glDrawElements).
     count_ = static_cast<int>(data.indices.empty()

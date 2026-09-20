@@ -4,6 +4,8 @@
 
 #include "Shader.h"
 
+#include <glm/gtc/type_ptr.hpp>  // glm::value_ptr
+
 #include <iostream>  // std::clog
 #include <string>
 
@@ -122,4 +124,71 @@ bool Shader::compile_from_source(const std::string& vs, const std::string& fs)
 
     id_ = program;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// loc: ubicación del uniform por nombre. Devuelve -1 si no existe (sin avisar).
+// ---------------------------------------------------------------------------
+int Shader::loc(const std::string& name) const
+{
+    return glGetUniformLocation(id_, name.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// set_uniform (por ubicación): usa glProgramUniform* para no exigir que el
+// programa esté activo (use()). loc == -1 se ignora en silencio: el llamador
+// puede cachear la ubicación y setearla sin chequear en cada frame.
+// ---------------------------------------------------------------------------
+void Shader::set_uniform(int loc, const glm::mat4& value)
+{
+    if (loc < 0) return;
+    glProgramUniformMatrix4fv(id_, loc, 1, GL_FALSE, glm::value_ptr(value));
+}
+
+void Shader::set_uniform(int loc, const glm::vec3& value)
+{
+    if (loc < 0) return;
+    glProgramUniform3fv(id_, loc, 1, glm::value_ptr(value));
+}
+
+void Shader::set_uniform(int loc, const glm::vec4& value)
+{
+    if (loc < 0) return;
+    glProgramUniform4fv(id_, loc, 1, glm::value_ptr(value));
+}
+
+// ---------------------------------------------------------------------------
+// set_uniform (por nombre): comodidad; consulta y avisa por stderr si falta.
+// ---------------------------------------------------------------------------
+void Shader::set_uniform(const std::string& name, const glm::mat4& value)
+{
+    const int l = loc(name);
+    if (l < 0) {
+        std::clog << "[Shader] Uniform '" << name << "' no está en el programa."
+                  << std::endl;
+        return;
+    }
+    set_uniform(l, value);
+}
+
+void Shader::set_uniform(const std::string& name, const glm::vec3& value)
+{
+    const int l = loc(name);
+    if (l < 0) {
+        std::clog << "[Shader] Uniform '" << name << "' no está en el programa."
+                  << std::endl;
+        return;
+    }
+    set_uniform(l, value);
+}
+
+void Shader::set_uniform(const std::string& name, const glm::vec4& value)
+{
+    const int l = loc(name);
+    if (l < 0) {
+        std::clog << "[Shader] Uniform '" << name << "' no está en el programa."
+                  << std::endl;
+        return;
+    }
+    set_uniform(l, value);
 }

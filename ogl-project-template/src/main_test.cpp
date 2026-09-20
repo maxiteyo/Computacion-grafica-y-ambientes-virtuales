@@ -7,14 +7,61 @@
 //
 // Ejecución (desde la raíz del proyecto):
 //   ./test_rm
+//
+// Práctico 03: los tests de primitives cubren la tupla nueva (sin color, con
+// normal y tex_coords), los conteos de vértices/índices de cilindro, cono y
+// esfera, las costuras y anillos degenerados, y la VERIFICACIÓN DEL ORDEN DE
+// LOS TRIÁNGULOS con el producto vectorial (B-A)x(C-A): el resultado debe
+// apuntar en la misma dirección que la normal del primer vértice del triángulo
+// (CCW visto desde afuera; el culling está deshabilitado y no lo detecta).
 // ============================================================================
 
 #include <iostream>
 #include <cassert>
+#include <cmath>
+
+#include <glm/glm.hpp>  // glm::cross, glm::dot, glm::normalize, glm::length
 
 #include "core/ResourceManager.h"
 #include "core/Primitives.h"
 #include "core/MeshData.h"
+
+namespace {
+
+// True si el triángulo (a,b,c) está en CCW visto desde su normal saliente:
+// (B-A)x(C-A) debe quedar a < 90° de la normal del vértice A. Los triángulos
+// degenerados (ápice del cono, polos de la esfera) se dan por buenos.
+bool check_winding(const MeshData& m, unsigned a, unsigned b, unsigned c)
+{
+	const glm::vec3 A = m.vertices[a].position;
+	const glm::vec3 B = m.vertices[b].position;
+	const glm::vec3 C = m.vertices[c].position;
+	const glm::vec3 g = glm::cross(B - A, C - A);
+	if (glm::length(g) < 1e-6f) return true;
+	return glm::dot(glm::normalize(g),
+	                glm::normalize(m.vertices[a].normal)) > 0.5f;
+}
+
+bool all_winding_ok(const MeshData& m)
+{
+	for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+		if (!check_winding(m, m.indices[i], m.indices[i+1], m.indices[i+2]))
+			return false;
+	}
+	return true;
+}
+
+// Conteo de vértices de posición (casi) idéntica => cicatriz/costura.
+int count_near(const MeshData& m, const glm::vec3& p, float eps)
+{
+	int n = 0;
+	for (const auto& v : m.vertices) {
+		if (glm::length(v.position - p) < eps) ++n;
+	}
+	return n;
+}
+
+}  // namespace
 
 int main()
 {
@@ -121,13 +168,26 @@ int main()
 	          << " vertices y " << cube.indices.size()
 	          << " indices." << std::endl;
 
-	// El cubo por defecto tiene lado unitario (de -0.5 a 0.5).
+	// El cubo por defecto tiene lado unitario (de -0.5 a 0.5), normales de
+	// módulo 1 y tex_coords dentro de [0,1].
 	for (const auto& v : cube.vertices) {
-		assert(v.px >= -0.501f && v.px <= 0.501f);
-		assert(v.py >= -0.501f && v.py <= 0.501f);
-		assert(v.pz >= -0.501f && v.pz <= 0.501f);
+		assert(v.position.x >= -0.501f && v.position.x <= 0.501f);
+		assert(v.position.y >= -0.501f && v.position.y <= 0.501f);
+		assert(v.position.z >= -0.501f && v.position.z <= 0.501f);
+		assert(std::abs(glm::length(v.normal) - 1.0f) < 1e-4f);
+		assert(v.tex_coords.x >= -1e-4f && v.tex_coords.x <= 1.0f + 1e-4f);
+		assert(v.tex_coords.y >= -1e-4f && v.tex_coords.y <= 1.0f + 1e-4f);
 	}
-	std::cout << "  OK: cubo de lado unitario (extremos -0.5..0.5)." << std::endl;
+	std::cout << "  OK: cubo de lado unitario (extremos -0.5..0.5), normales y UV." << std::endl;
+
+	// Las normales de cada cara son vectores de eje puro (solo una componente
+	// no nula): una cara no "mezcla" normales.
+	for (const auto& v : cube.vertices) {
+		const float abs_sum = std::abs(v.normal.x) + std::abs(v.normal.y)
+		                    + std::abs(v.normal.z);
+		assert(std::abs(abs_sum - 1.0f) < 1e-4f && "La normal del cubo es de eje puro");
+	}
+	std::cout << "  OK: normales por cara (vectores de eje puro)." << std::endl;
 
 	// La escala escalable produce una "placa" (p. ej. escala Z > 1).
 	const auto plate = primitives::cube(1.0f, 1.0f, 2.0f);
@@ -136,15 +196,185 @@ int main()
 	std::cout << std::endl;
 
 	// ---------------------------------------------------------------
-	// Test 9: el offset del atributo color está en la posición esperada (12)
-	//   (el módulo Mesh lo calcula con offsetof; acá se verifica la tupla).
+	// Test 9: layout de la tupla Vertex (sin color, con normal y tex_coords)
+	//   El módulo Mesh calcula los offsets con offsetof; acá se verifica que
+	//   la tupla quede como se documenta: 32 bytes, offsets 0/12/24.
 	// ---------------------------------------------------------------
-	std::cout << "[Test 9] Layout de Vertex (offset de color)..." << std::endl;
-	Vertex v;
-	const auto off_color = reinterpret_cast<const char*>(&v.r) -
-	                       reinterpret_cast<const char*>(&v);
-	assert(off_color == 12 && "Color debe empezar en el byte 12");
-	std::cout << "  OK: offset de color = " << off_color << " bytes." << std::endl;
+	std::cout << "[Test 9] Layout de Vertex (Práctica 3)..." << std::endl;
+	assert(sizeof(Vertex) == 32 && "sizeof(Vertex) debe ser 32 bytes");
+	assert(offsetof(Vertex, position)   == 0  && "position debe arrancar en el byte 0");
+	assert(offsetof(Vertex, normal)     == 12 && "normal debe arrancar en el byte 12");
+	assert(offsetof(Vertex, tex_coords) == 24 && "tex_coords debe arrancar en el byte 24");
+	std::cout << "  OK: sizeof=" << sizeof(Vertex)
+	          << ", offsets position/normal/tex_coords = "
+	          << offsetof(Vertex, position) << "/" << offsetof(Vertex, normal)
+	          << "/" << offsetof(Vertex, tex_coords) << "." << std::endl;
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 10: cilindro (radio, largo, 12 gajos, 1 anillo) + winding
+	// ---------------------------------------------------------------
+	std::cout << "[Test 10] primitives::cylinder()..." << std::endl;
+	const float cyl_radio = 0.5f, cyl_largo = 1.0f;
+	const MeshData cyl = primitives::cylinder(cyl_radio, cyl_largo, 12U);
+	// Lateral: 2*(12+1) = 26; 2 tapas de 13 => 52 vértices.
+	assert(cyl.vertices.size() == 52 && "El cilindro debe tener 52 vértices");
+	assert(cyl.indices.size() == 144 && "El cilindro debe tener 144 índices");
+	std::cout << "  OK: " << cyl.vertices.size() << " vértices y "
+	          << cyl.indices.size() << " índices." << std::endl;
+
+	// Costura del lateral: por cada anillo hay dos vértices LATERALES en theta=0
+	// (u = 0 y u = 1) con la misma posición (radio, y, 0). Nota: las tapas
+	// aportan APARTE su propio rim en ese mismo punto (no comparten vértice),
+	// por eso clasificamos por la normal y no por la posición.
+	auto count_lateral_at = [&](const glm::vec3& probe) {
+		int n = 0;
+		for (const auto& v : cyl.vertices)
+			if (glm::length(v.position - probe) < 1e-4f
+			    && std::abs(v.normal.y) < 1e-5f)  // normal radial => lateral
+				++n;
+		return n;
+	};
+	assert(count_lateral_at(glm::vec3(cyl_radio, 0.5f * cyl_largo, 0.0f)) == 2
+	       && "La costura superior duplica el vértice lateral (u=0 y u=1)");
+	assert(count_lateral_at(glm::vec3(cyl_radio, -0.5f * cyl_largo, 0.0f)) == 2
+	       && "La costura inferior duplica el vértice lateral (u=0 y u=1)");
+	std::cout << "  OK: costura del lateral con vértice duplicado (u=0 y u=1)." << std::endl;
+
+	// Tapas: normales axiales, nunca comparten vértice con el lateral. Las
+	// clasificamos POR LA NORMAL (el y de los anillos superior/inferior del
+	// lateral coincide con el de las tapas).
+	int top_cap = 0, bot_cap = 0;
+	for (const auto& v : cyl.vertices) {
+		if (v.normal == glm::vec3(0, 1, 0)) {
+			++top_cap;
+			assert(std::abs(v.position.y - 0.5f * cyl_largo) < 1e-5f
+			       && "Tapa superior en y = +largo/2");
+		}
+		if (v.normal == glm::vec3(0, -1, 0)) {
+			++bot_cap;
+			assert(std::abs(v.position.y + 0.5f * cyl_largo) < 1e-5f
+			       && "Tapa inferior en y = -largo/2");
+		}
+	}
+	assert(top_cap == 13 && "Tapa superior: centro + 12 rim");
+	assert(bot_cap == 13 && "Tapa inferior: centro + 12 rim");
+	std::cout << "  OK: tapas con normal axial (13 vértices c/u, separadas del lateral)." << std::endl;
+
+	// Los vértices LATERALES (normal radial: y == 0 en la normal) quedan sobre
+	// el manto de radio cyl_radio en TODOS los anillos (inclusive los de las
+	// tapas), y cada normal es unitaria y radial.
+	for (const auto& v : cyl.vertices) {
+		assert(std::abs(glm::length(v.normal) - 1.0f) < 1e-4f);
+		if (std::abs(v.normal.y) < 1e-5f) {  // lateral
+			const float r2 = v.position.x * v.position.x + v.position.z * v.position.z;
+			assert(std::abs(std::sqrt(r2) - cyl_radio) < 1e-4f
+			       && "Lateral sobre el radio teórico (todos los anillos)");
+		} else {  // tapa
+			assert(v.normal == glm::vec3(0, 1, 0) || v.normal == glm::vec3(0, -1, 0));
+		}
+	}
+	std::cout << "  OK: lateral sobre el radio teórico con normal radial." << std::endl;
+
+	assert(all_winding_ok(cyl) && "Todos los triángulos del cilindro en CCW");
+	std::cout << "  OK: winding CCW verificado por producto vectorial." << std::endl;
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 11: cono (radio, conicidad 60°, 12 gajos, 1 anillo) + winding
+	// ---------------------------------------------------------------
+	std::cout << "[Test 11] primitives::cone()..." << std::endl;
+	const float cone_radio = 0.6f, cone_conicidad = 60.0f;
+	const float semi  = 0.5f * cone_conicidad * 3.14159265f / 180.0f;
+	const float h_cone = cone_radio / std::tan(semi);   // radio / tan(semiángulo)
+	const MeshData cone = primitives::cone(cone_radio, cone_conicidad, 12U);
+	// Lateral 2*(12+1) = 26 + base (12+1) = 13 => 39 vértices.
+	assert(cone.vertices.size() == 39 && "El cono debe tener 39 vértices");
+	assert(cone.indices.size() == 108 && "El cono debe tener 108 índices");
+	std::cout << "  OK: " << cone.vertices.size() << " vértices y "
+	          << cone.indices.size() << " índices." << std::endl;
+
+	// Altura derivada de la conicidad: y_min = -h/2 (base), y_max = +h/2.
+	float y_min = 1e30f, y_max = -1e30f;
+	for (const auto& v : cone.vertices) {
+		y_min = std::min(y_min, v.position.y);
+		y_max = std::max(y_max, v.position.y);
+	}
+	assert(std::abs(y_min + 0.5f * h_cone) < 1e-4f
+	       && "La base del cono cae en y = -h/2 (h = radio/tan(semi))");
+	assert(std::abs(y_max - 0.5f * h_cone) < 1e-4f
+	       && "El ápice del cono cae en y = +h/2 (h = radio/tan(semi))");
+	std::cout << "  OK: altura h = " << h_cone
+	          << " deducida de la conicidad (grados -> semiángulo)." << std::endl;
+
+	// Ápice DEGENERADO: los últimos 13 vértices (anillo superior, radio 0)
+	// comparten el punto (0, +h/2, 0), con 13 normales distintas (por gajo).
+	assert(count_near(cone, glm::vec3(0, 0.5f * h_cone, 0), 1e-4f) == 13
+	       && "El ápice degenerado debe tener 13 vértices en el mismo punto");
+	std::cout << "  OK: ápice como anillo degenerado (13 vértices, uno por gajo)." << std::endl;
+
+	// Base: tapa separada del lateral con normal -Y.
+	//   (a) el centro del fan está en (0, -h/2, 0).
+	assert(count_near(cone, glm::vec3(0.0f, -0.5f * h_cone, 0.0f), 1e-4f) == 1
+	       && "El centro de la tapa de la base es el único vértice en (0,-h/2,0)");
+	//   (b) vértices de la base por NORMAL: centro + 12 rim = 13, todos -Y.
+	int base_verts = 0;
+	for (const auto& v : cone.vertices) {
+		if (v.normal == glm::vec3(0, -1, 0)) {
+			++base_verts;
+			assert(std::abs(v.position.y + 0.5f * h_cone) < 1e-5f
+			       && "Vértices de la base en y = -h/2");
+		}
+	}
+	assert(base_verts == 13 && "Fan de la base: 1 centro + 12 rim (todos -Y)");
+	//   (c) el anillo lateral en y=-h/2 usa 13 vértices PROPIOS (12 + costura)
+	//       con normal oblicua hacia arriba; el fan de -Y es aparte.
+	int lateral_ring = 0;
+	for (const auto& v : cone.vertices) {
+		if (std::abs(v.position.y + 0.5f * h_cone) < 1e-5f && v.normal.y > 0.0f) {
+			++lateral_ring;
+		}
+	}
+	assert(lateral_ring == 13 && "Anillo lateral de la base: 12 + costura, separado del fan");
+	std::cout << "  OK: base en y = -h/2 con fan (13) separado del anillo lateral (13)." << std::endl;
+
+	assert(all_winding_ok(cone) && "Todos los triángulos del cono en CCW");
+	std::cout << "  OK: winding CCW verificado por producto vectorial." << std::endl;
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 12: esfera (radio, 30 gajos, 18 anillos) + winding
+	// ---------------------------------------------------------------
+	std::cout << "[Test 12] primitives::sphere()..." << std::endl;
+	const float sph_radio = 0.55f;
+	const MeshData sph = primitives::sphere(sph_radio, 30U, 18U);
+	assert(sph.vertices.size() == (18U + 1U) * (30U + 1U)
+	       && "La esfera debe tener (M+1)*(N+1) vértices");
+	assert(sph.indices.size() == 6U * 30U * 18U
+	       && "La esfera debe tener 6*M*N índices");
+	std::cout << "  OK: " << sph.vertices.size() << " vértices y "
+	          << sph.indices.size() << " índices." << std::endl;
+
+	// Todos los vértices sobre la esfera de radio sph_radio (excepto degenerados
+	// que igual están sobre la misma).
+	for (const auto& v : sph.vertices) {
+		assert(std::abs(glm::length(v.position) - sph_radio) < 1e-4f
+		       && "Todos los vértices sobre el radio teórico");
+		assert(std::abs(glm::length(v.normal) - 1.0f) < 1e-4f
+		       && "Normales unitarias (normal = posición normalizada)");
+	}
+	std::cout << "  OK: vértices y normales sobre el radio teórico." << std::endl;
+
+	// Polos degenerados: primer anillo en (0,-r,0) y último en (0,+r,0), con
+	// 31 vértices cada uno.
+	assert(count_near(sph, glm::vec3(0.0f, -sph_radio, 0.0f), 1e-4f) == 31
+	       && "Polo sur degenerado con N+1 vértices");
+	assert(count_near(sph, glm::vec3(0.0f,  sph_radio, 0.0f), 1e-4f) == 31
+	       && "Polo norte degenerado con N+1 vértices");
+	std::cout << "  OK: polos como anillos degenerados (31 vértices c/u)." << std::endl;
+
+	assert(all_winding_ok(sph) && "Todos los triángulos de la esfera en CCW");
+	std::cout << "  OK: winding CCW verificado por producto vectorial." << std::endl;
 	std::cout << std::endl;
 
 	std::cout << "=== Todos los tests pasaron ===" << std::endl;
