@@ -22,9 +22,16 @@
 // Estado acotado (para que lookAt no se indefina ni la cámara atraviese nada):
 //   pitch     ∈ [±0.9·π/2]  (si llegara a ±π/2, up y la vista son colineales
 //                            y el producto vectorial interno de lookAt se anula).
-//   distancia ∈ [2, 50]     (no traspasar el objetivo ni perderlo de vista).
+//   distancia ∈ [30, 3000]  (no traspasar el objetivo ni perderlo de vista).
 //   El alto de la ventana minimizada se guarda como >= 1: aspect nunca divide
 //   por cero (¿qué pasa si height llega a 0? -> se responde en set_viewport()).
+//
+// Práctico 06: la escena pasa al mundo en METROS (el FDM suma 5000 m de
+// altura y velocidades de ~150 m/s), por lo que la proyección y la órbita se
+// ajustan a esa escala: near/far cubren el vuelo (el suelo queda a 5000 m bajo
+// el avión) y la distancia inicial sigue al avión de cerca (60 m) para que la
+// aeronave (~9.6 m con set_scale) se vea a una talla legible en la vista de
+// "chase". El zoom del mouse es proporcional a la distancia (InputHandler).
 // ============================================================================
 #pragma once
 
@@ -59,23 +66,30 @@ public:
     // Par de matrices listas para los uniforms uView / uProjection.
     const CameraData& data() const { return data_; }
 
+    // Distancia actual de la órbita [m]: la consume InputHandler para el zoom
+    // proporcional (la ganancia se escala con la distancia).
+    float distance() const { return distancia_; }
+
 private:
     void rebuild_projection();
     void rebuild_view(const glm::vec3& objetivo);
 
-    // Configuración de la proyección (Unidad VII).
+    // Configuración de la proyección (Unidad VII). Escala del mundo: METROS
+    // (Práctico 06: el FDM trabaja en metros, altitud 5000 m).
     static constexpr float kFovYDeg  = 45.0f;  // ángulo de visión vertical θv
-    static constexpr float kNear     = 0.5f;   // no "muy chico" (precisión de Z)
-    static constexpr float kFar      = 500.0f;
+    static constexpr float kNear     = 5.0f;   // no "muy chico" (precisión de Z)
+    static constexpr float kFar      = 30000.0f;  // cubre el vuelo + el suelo
     // Clamps de la órbita (preguntas de la consigna, ver header).
     static constexpr float kPitchLimit = 0.9f; // en múltiplos de π/2 (±81°)
-    static constexpr float kMinDist = 2.0f;
-    static constexpr float kMaxDist = 50.0f;
+    static constexpr float kMinDist = 30.0f;
+    static constexpr float kMaxDist = 3000.0f;
 
+    // Órbita inicial: vista de "chase" 3/4 atrás-arriba, a 60 m del avión
+    // (con el zoom proporcional del mouse se ajusta en ~30 px de arrastre).
     int   width_  = 0;
     int   height_ = 0;
     float yaw_        = glm::radians(90.0f);  // longitud inicial: costado 3/4
     float pitch_      = glm::radians(25.0f);  // latitud inicial: vista elevada
-    float distancia_  = 10.0f;
+    float distancia_  = 60.0f;                // sigue al avión de cerca
     CameraData data_{};
 };

@@ -1,14 +1,24 @@
 // ============================================================================
-// main_test.cpp — Tests de ResourceManager, primitives, CameraSystem e
-//                 InputHandler (C++ puro, sin OpenGL).
+// main_test.cpp — Tests de ResourceManager, primitives, CameraSystem,
+//                 InputHandler y FlightData (C++ puro, sin OpenGL).
 //
-// Compilación (desde la raíz del proyecto):
-//   g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp
-//       src/core/ResourceManager.cpp src/core/CameraSystem.cpp
-//       src/core/InputHandler.cpp src/main_test.cpp -o test_rm
+// Compilación (desde la raíz del proyecto, una sola línea):
+//   g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include
+//       libs/dlfdm/src/dlfdm/fdmsolver.cpp
+//       libs/dlfdm/src/dlfdm/aerodynamicsmodel.cpp
+//       libs/dlfdm/src/dlfdm/aircraftdynamics.cpp
+//       libs/dlfdm/src/dlfdm/propulsionmodel.cpp
+//       libs/dlfdm/src/dlfdm/models/aircraft/jettrainer.cpp
+//       libs/dlfdm/src/dlfdm/models/propulsion/turbofan.cpp
+//       libs/dlfdm/src/dlfdm/models/propulsion/turbojet.cpp
+//       src/core/Primitives.cpp src/core/ResourceManager.cpp
+//       src/core/CameraSystem.cpp src/core/InputHandler.cpp
+//       src/core/FlightData.cpp src/main_test.cpp
+//       -o /tmp/opencode/test_rm -lglfw -lpthread
+//   (InputHandler.cpp lee teclado por GLFW en update(), por eso -lglfw.)
 //
 // Ejecución (desde la raíz del proyecto):
-//   ./test_rm
+//   /tmp/opencode/test_rm
 //
 // Práctico 03: los tests de primitives cubren la tupla nueva (sin color, con
 // normal y tex_coords), los conteos de vértices/índices de cilindro, cono y
@@ -22,6 +32,11 @@
 // la vista orbital (objetivo centrado, clamps de pitch/distancia) y
 // InputHandler (primer cuadro sin salto, signos y ganancias px->rad) se
 // testean sin GPU ni ventana.
+//
+// Práctico 06: FlightData (to_world/to_world_basis/forward_world) verifica la
+// conversión NED -> escena y que el avión vuela "de morro"; el FDM integra 60 s
+// desde el trim y debe mantener la altura y la velocidad; InputHandler ahora
+// también prueba las rampas, los topes de cada superficie y set_controls().
 // ============================================================================
 
 #include <iostream>
@@ -31,12 +46,17 @@
 #include <glm/glm.hpp>                     // glm::cross, dot, normalize, length
 #include <glm/gtc/matrix_transform.hpp>    // glm::radians (tests de cámara)
 
+#include <dlfdm/defines.h>
+#include <dlfdm/fdmsolver.h>
+#include <dlfdm/models/aircraft/jettrainer.h>
+
 #include "core/ResourceManager.h"
 #include "core/Primitives.h"
 #include "core/MeshData.h"
 #include "core/CameraCommand.h"
 #include "core/CameraSystem.h"
 #include "core/InputHandler.h"
+#include "core/FlightData.h"
 
 namespace {
 
@@ -437,20 +457,22 @@ int main()
 	// ---------------------------------------------------------------
 	std::cout << "[Test 14] CameraSystem::update() (vista orbital)..." << std::endl;
 	{
+		// Escala del mundo en METROS (Práctico 06): distancia inicial 60 m de
+		// seguimiento y clamps [30, 3000] (ver CameraSystem.h).
 		const glm::vec3 objetivo(0.0f);
 		CameraCommand cmd0;                        // deltas cero
 		cam.update(objetivo, glm::vec3(0.0f), cmd0);
 		glm::vec4 centered = cam.data().view * glm::vec4(objetivo, 1.0f);
 		assert(std::abs(centered.x) < 1e-4f && std::abs(centered.y) < 1e-4f
 		       && "El objetivo queda centrado en el view space");
-		assert(std::abs(centered.z - (-10.0f)) < 1e-3f
-		       && "El objetivo está a distancia_ = 10 delante de la cámara");
+		assert(std::abs(centered.z - (-60.0f)) < 1e-3f
+		       && "El objetivo está a distancia_ = 60 (m) delante de la cámara");
 
 		// Comando extremo: la vista no se indefine (clamps de pitch y distancia).
 		CameraCommand big;
 		big.yaw_delta   = 5.0f;
 		big.pitch_delta = 50.0f;   // muy por encima del límite ±0.9·π/2
-		big.dist_delta  = -100.0f; // muy por debajo del mínimo
+		big.dist_delta  = -10000.0f; // muy por debajo del mínimo
 		cam.update(objetivo, glm::vec3(0.0f), big);
 		const glm::mat4& view = cam.data().view;
 		bool finito = true;
@@ -463,8 +485,16 @@ int main()
 		centered = cam.data().view * glm::vec4(objetivo, 1.0f);
 		assert(std::abs(centered.x) < 1e-4f && std::abs(centered.y) < 1e-4f
 		       && "Con el comando extremo el objetivo sigue centrado");
-		assert(std::abs(centered.z + 2.0f) < 1e-3f
-		       && "La distancia se encoge al mínimo (2.0), no atraviesa el objetivo");
+		assert(std::abs(centered.z + 30.0f) < 1e-3f
+		       && "La distancia se encoge al mínimo (30 m), no atraviesa el objetivo");
+
+		// Y también por el máximo: no se pierde de vista al alejarse.
+		CameraCommand far;
+		far.dist_delta = 100000.0f;
+		cam.update(objetivo, glm::vec3(0.0f), far);
+		centered = cam.data().view * glm::vec4(objetivo, 1.0f);
+		assert(std::abs(centered.z + 3000.0f) < 1e-3f
+		       && "La distancia se estira al máximo (3000 m)");
 		std::cout << "  OK: vista apuntando al objetivo con clamps (pitch y dist)."
 		          << std::endl;
 	}
@@ -492,18 +522,256 @@ int main()
 		       && "dy = -40 px -> pitch_delta = -dy * kOrbitGain (elevar)");
 		assert(cmd.dist_delta == 0.0f && "Sin botón derecho no hay zoom");
 
-		// Botón derecho: +20 px en Y -> se acerca (dist_delta negativo).
-		input.poll(200.0, 180.0, false, true, cmd);
-		assert(std::abs(cmd.dist_delta - (-20.0f * InputHandler::kZoomGain)) < 1e-6f
-		       && "dy = +20 px -> dist_delta = -dy * kZoomGain (acerca)");
+		// Botón derecho, arrastrar hacia ARRIBA (-20 px en Y) -> se acerca.
+		// El zoom es proporcional a la distancia actual (mundo en metros):
+		// dist_delta = dy * kZoomGain * distancia (dy < 0 => acerca).
+		input.poll(200.0, 140.0, false, true, cmd, 150.0f);
+		assert(std::abs(cmd.dist_delta
+		                - ((-20.0f) * InputHandler::kZoomGain * 150.0f)) < 1e-6f
+		       && "dy = -20 px (arriba) -> dist_delta < 0: acerca");
 		assert(cmd.yaw_delta == 0.0f && cmd.pitch_delta == 0.0f
 		       && "Sin botón izquierdo no hay órbita");
+
+		// El mismo arrastre a otra distancia cambia la ganancia (proporcional).
+		input.poll(200.0, 116.0, false, true, cmd, 600.0f);
+		assert(std::abs(cmd.dist_delta
+		                - ((-24.0f) * InputHandler::kZoomGain * 600.0f)) < 1e-6f
+		       && "A 600 m el mismo dy acerca 4x más (ganancia proporcional)");
+		assert(cmd.dist_delta < 0.0f && "En todo el rango, arriba = acercar");
 
 		// Sin botones: comando vacío (pasar el mouse no mueve la cámara).
 		input.poll(300.0, 180.0, false, false, cmd);
 		assert(cmd.yaw_delta == 0.0f && cmd.pitch_delta == 0.0f
 		       && cmd.dist_delta == 0.0f && "Sin botones: nada se mueve");
-		std::cout << "  OK: primer cuadro, signos, ganancias y botones." << std::endl;
+		std::cout << "  OK: primer cuadro, signos, ganancias y botones."
+		          << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 16: FlightData::to_world() y forward_world(): la conversión
+	//          NED -> escena y que el avión vuela "de morro".
+	// ---------------------------------------------------------------
+	std::cout << "[Test 16] FlightData::to_world()/forward_world() (NED -> escena)..." << std::endl;
+	{
+		// Posición: x=este, y=−abajo(=arriba), z=−norte; el trim vuela a 5000 m.
+		dlfdm::AircraftState st{};
+		st.inertial_position = glm::vec3(0.0f, 0.0f, -5000.0f);
+		fp::FlightData fd = fp::to_world(st);
+		assert(glm::length(fd.position - glm::vec3(0.0f, 5000.0f, 0.0f)) < 1e-4f
+		       && "5000 m de altura NED (z=-5000) -> +Y del mundo");
+		st.inertial_position = glm::vec3(100.0f, 50.0f, -5000.0f);  // norte, este
+		fd = fp::to_world(st);
+		assert(glm::length(fd.position - glm::vec3(50.0f, 5000.0f, -100.0f)) < 1e-4f
+		       && "x=este, y=arriba, z=−norte (base dextrógira negando 2 ejes)");
+
+		// Morro: rumbo 0 (norte) -> −Z del mundo; rumbo 90 (este) -> +X.
+		const auto aprox = [](const glm::vec3& v, const glm::vec3& ref) {
+			return glm::length(v - ref) < 1e-5f;
+		};
+		dlfdm::AircraftState hd{};   // phi = theta = psi = 0
+		assert(aprox(fp::forward_world(hd), glm::vec3(0.0f, 0.0f, -1.0f))
+		       && "Rumbo 0 (norte): el morro apunta a −Z del mundo");
+		hd.psi = glm::radians(90.0f);
+		assert(aprox(fp::forward_world(hd), glm::vec3(1.0f, 0.0f, 0.0f))
+		       && "Rumbo 90° (este): el morro apunta a +X");
+		hd.psi = 0.0f;
+		hd.theta = glm::radians(10.0f);
+		const glm::vec3 fwd = fp::forward_world(hd);
+		assert(fwd.y > 0.0f && fwd.z < 0.0f
+		       && "Pitch positivo: el morro sube (+Y) sin dejar de ir a −Z");
+		hd.theta = 0.0f;
+		hd.phi = glm::radians(30.0f);
+		assert(aprox(fp::forward_world(hd), glm::vec3(0.0f, 0.0f, -1.0f))
+		       && "El alabeo no cambia la dirección del morro (rumbo/cabeceo)");
+
+		// Vuelo recto: la dirección de avance coincide con la del morro.
+		dlfdm::AircraftState vel{};
+		vel.body_velocity = glm::vec3(150.0f, 0.0f, 0.0f);  // TAS, hacia adelante
+		const glm::vec3 dir = glm::normalize(fp::forward_world(vel));
+		assert(aprox(dir, glm::vec3(0.0f, 0.0f, -1.0f))
+		       && "A 150 m/s hacia adelante, la dirección de avance = la del morro");
+		std::cout << "  OK: to_world (posición) y forward_world (morro al vuelo)."
+		          << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 17: FDM real: desde el trim y sin tocar los mandos, la
+	//          aeronave mantiene la altura (5000 ± 25 m) y la velocidad
+	//          TAS (~150 m/s) durante 60 s de simulación.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 17] FDM: el trim mantiene altura y velocidad (60 s)..."
+	          << std::endl;
+	{
+		const dlfdm::AircraftParameters p = dlfdm::jettrainer::load_model();
+		dlfdm::FDMSolver fdm(p);  // dt = 1/120 s (por defecto del solver)
+		const dlfdm::TrimPoint trim = dlfdm::jettrainer::get_trim_condition(
+			dlfdm::jettrainer::TrimCondition::kISA5000TAS150);
+		fdm.setState(trim.state);
+
+		const int steps = 60 * 120;  // 60 s a dt = 1/120
+		for (int i = 0; i < steps; ++i)
+			fdm.update(trim.controls);
+
+		const dlfdm::AircraftState& st = fdm.getState();
+		const float alt   = -st.inertial_position.z;  // [m]
+		const float speed = glm::length(st.body_velocity);  // TAS [m/s]
+		assert(std::abs(alt - 5000.0f) < 25.0f
+		       && "Altura: 5000 ± 25 m (oscilación residual del trim)");
+		assert(std::abs(speed - 150.0f) < 2.0f
+		       && "TAS: ~150 ± 2 m/s (540 km/h)");
+		std::cout << "  OK: tras 60 s -> altura " << alt << " [m], TAS "
+		          << speed << " [m/s]." << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 18: InputHandler::update_sticks(): rampas con el dt, topes de
+	//          cada superficie (jettrainer), potencia [0,1], SOLTAR la tecla
+	//          devuelve el mando al trim (resorte) y set_controls() fija la
+	//          posición inicial y la "casa" del resorte.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 18] InputHandler::set_controls()/update_sticks() "
+	             "(mandos y rampas)..." << std::endl;
+	{
+		// Estado inicial: sin trim, todos los mandos en su neutro (0).
+		InputHandler input;
+		assert(input.controls().elevator == 0.0f
+		       && input.controls().aileron  == 0.0f
+		       && input.controls().rudder   == 0.0f
+		       && "Deflexiones en neutro con el bastón centrado");
+		assert(input.controls().throttle == 0.0f && "Potencia inicial en 0");
+
+		// ↑: palanca adelante -> nariz abajo -> elevador hasta +15°.
+		for (int i = 0; i < 10; ++i)
+			input.update_sticks(true, false, false, false,
+			                    false, false, false, false, 0.1f);
+		assert(std::abs(input.controls().elevator - glm::radians(15.0f)) < 1e-4f
+		       && "Elevador llega a su tope +15° (nariz abajo)");
+
+		// ↓: palanca atrás -> nariz arriba -> hasta −25°. La rampa es de
+		// 1.0/s: cruzar el rango completo (−1..+1) lleva 2 s -> 20 pasos.
+		for (int i = 0; i < 20; ++i)
+			input.update_sticks(false, true, false, false,
+			                    false, false, false, false, 0.1f);
+		assert(std::abs(input.controls().elevator - glm::radians(-25.0f)) < 1e-4f
+		       && "Elevador llega a su tope −25° (nariz arriba)");
+
+		// Alerones: ← → −20°, → → +20° (ala izquierda/derecha abajo).
+		{
+			InputHandler a;
+			for (int i = 0; i < 10; ++i)
+				a.update_sticks(false, false, true, false,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(a.controls().aileron - glm::radians(-20.0f)) < 1e-4f
+			       && "Alerones: tope −20° (bastón a la izquierda)");
+			// Cruzar todo el rango con la rampa de 1.0/s: 20 pasos.
+			for (int i = 0; i < 20; ++i)
+				a.update_sticks(false, false, false, true,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(a.controls().aileron - glm::radians(20.0f)) < 1e-4f
+			       && "Alerones: tope +20° (bastón a la derecha)");
+		}
+
+		// Timón: Q → +30° (nariz izq), E → −30° (nariz der).
+		{
+			InputHandler r;
+			for (int i = 0; i < 10; ++i)
+				r.update_sticks(false, false, false, false,
+				                true, false, false, false, 0.1f);
+			assert(std::abs(r.controls().rudder - glm::radians(30.0f)) < 1e-4f
+			       && "Timón: tope +30° (pedal izquierdo)");
+			for (int i = 0; i < 20; ++i)
+				r.update_sticks(false, false, false, false,
+				                false, true, false, false, 0.1f);
+			assert(std::abs(r.controls().rudder - glm::radians(-30.0f)) < 1e-4f
+			       && "Timón: tope −30° (pedal derecho)");
+		}
+
+		// Potencia: W sube hasta 1, S baja hasta 0 (acotada a [0,1]).
+		{
+			InputHandler t;
+			for (int i = 0; i < 20; ++i)
+				t.update_sticks(false, false, false, false,
+				                false, false, true, false, 0.1f);
+			assert(std::abs(t.controls().throttle - 1.0f) < 1e-5f
+			       && "Potencia llega a 1 (W) y no la pasa");
+			for (int i = 0; i < 20; ++i)
+				t.update_sticks(false, false, false, false,
+				                false, false, false, true, 0.1f);
+			assert(std::abs(t.controls().throttle) < 1e-5f
+			       && "Potencia baja a 0 (S) y no es negativa");
+		}
+
+		// Soltar la tecla = RESORTE: el mando vuelve hacia el trim (sin
+		// set_controls, la "casa" es el neutro 0). El avión no queda girando
+		// solo con la deflexión retenida.
+		{
+			InputHandler h;
+			for (int i = 0; i < 4; ++i)
+				h.update_sticks(true, false, false, false,
+				                false, false, false, false, 0.1f);
+			const float desviado = h.controls().elevator;
+			assert(desviado > 0.0f && "Hay deflexión acumulada (palanca adelante)");
+
+			h.update_sticks(false, false, false, false,
+			                false, false, false, false, 0.1f);
+			assert(h.controls().elevator < desviado
+			       && h.controls().elevator > 0.0f
+			       && "Al soltar, el mando VUELVE hacia el neutro (resorte), "
+			          "sin pasarse");
+
+			for (int i = 0; i < 20; ++i)
+				h.update_sticks(false, false, false, false,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(h.controls().elevator) < 1e-6f
+			       && "Sin set_controls la casa es el neutro 0: termina en 0");
+		}
+
+		// set_controls() fija la posición inicial y la "casa" del resorte.
+		{
+			dlfdm::ControlInputs cc{};
+			cc.elevator = glm::radians(-5.37f);  // ≈ el trim del jettrainer
+			cc.throttle = 0.5f;
+			InputHandler h;
+			h.set_controls(cc);
+			assert(std::abs(h.controls().elevator - cc.elevator) < 1e-4f
+			       && h.controls().throttle == 0.5f
+			       && "set_controls() devuelve la condición inicial");
+			for (int i = 0; i < 5; ++i)
+				h.update_sticks(false, false, false, false,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(h.controls().elevator - cc.elevator) < 1e-6f
+			       && "Sin teclas, los ejes arrancan desde el trim (no cambian)");
+
+			// Tocar y soltar: el mando VUELVE al TRIM (no al cero).
+			for (int i = 0; i < 3; ++i)
+				h.update_sticks(true, false, false, false,
+				                false, false, false, false, 0.1f);
+			assert(h.controls().elevator > cc.elevator
+			       && "↑ (palanca adelante) mueve el elevador desde el trim "
+			          "hacia +15° (nariz abajo)");
+			for (int i = 0; i < 10; ++i)
+				h.update_sticks(false, false, false, false,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(h.controls().elevator - cc.elevator) < 1e-6f
+			       && "Al soltar, el elevador vuelve a la posición del TRIM");
+
+			// La potencia también: W sube, y al soltar vuelve al trim.
+			for (int i = 0; i < 3; ++i)
+				h.update_sticks(false, false, false, false,
+				                false, false, true, false, 0.1f);
+			assert(h.controls().throttle > cc.throttle && "W sube la potencia");
+			for (int i = 0; i < 20; ++i)
+				h.update_sticks(false, false, false, false,
+				                false, false, false, false, 0.1f);
+			assert(std::abs(h.controls().throttle - cc.throttle) < 1e-6f
+			       && "Al soltar W/S la potencia vuelve a la del trim");
+		}
+
+		std::cout << "  OK: rampas, topes, potencia, resorte al trim y "
+		             "set_controls()." << std::endl;
 	}
 	std::cout << std::endl;
 

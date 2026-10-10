@@ -1,38 +1,52 @@
 // ============================================================================
-// main.cpp — Práctico 05: cámara en la escena (CameraSystem + InputHandler)
+// main.cpp — Práctico 06: game loop, input y FDM
 //
-// La escena es la aeronave del Práctico 04 (Aircraft + RenderItem), pero la
-// visualización deja de usar la "caja negra" (uniform uAjuste, un escalado que
-// corregía el aspecto y daba vuelta el eje z SIN perspectiva) y pasa a una
-// PROYECCIÓN DE PERSPECTIVA real armada por CameraSystem:
-//   gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0)
+// La escena sigue siendo la aeronave del Práctico 04 (Aircraft + RenderItem)
+// con la cámara orbital del Práctico 05, pero ahora la aeronave se mueve según
+// un MODELO DE DINÁMICA DE VUELO (FDM, libs/dlfdm) sincronizado con el pintado
+// de cuadros.
+//
+// El loop usa la estrategia de PASO FIJO CON ACUMULADOR (consigna, Parte 1):
+//   - El FDM se integra con un paso pequeño y CONSTANTE (dt = 1/120 s): el
+//     error de cada paso no depende de la máquina.
+//   - El tiempo real de cada cuadro (frame_dt) se acumula y se consume en
+//     pasos discretos; el resto que queda NO se descarta (tiempo simulado +
+//     resto = tiempo de reloj).
+//   - frame_dt se topa en 0.25 s para que un cuadro lento (arrastrar la
+//     ventana, pausa del depurador) no haga diverger el acumulador (la
+//     aplicación simula como máximo 30 pasos y sigue viva, no se congela).
+//   - La entrada del usuario se lee UNA vez por cuadro FUERA del while de
+//     pasos fijos (es un estado: "¿está apretada ahora?").
 //
 // Módulos por responsabilidad (arquitectura de la cátedra):
-//   - CameraSystem : estado de la órbita (yaw/pitch/distancia) + view +
-//                    projection. No lee el mouse ni sabe cómo es la escena:
-//                    solo recibe el punto objetivo y un CameraCommand.
-//   - InputHandler : lee el mouse (posición + botones) una vez por cuadro
-//                    (polling) y lo convierte a CameraCommand.
-//   - Aircraft     : arma la pose del avión por cuadro (sin base: la cámara
-//                    elige el ángulo de vista, el modelo está en su
-//                    referencial natural: morro −X, +Y ala derecha, +Z arriba).
-//   - main         : orquesta: input -> cámara -> avión -> uniforms -> draw.
+//   - FlightData    : única transformación NED -> mundo (fp::to_world).
+//   - dlfdm::FDMSolver: integra la dinámica; se actualiza con los mandos y
+//                    entrega el estado (getState) una vez por cuadro.
+//   - InputHandler  : lee mouse + teclado por polling y produce CameraCommand
+//                    (cámara) y dlfdm::ControlInputs (mandos del avión).
+//   - CameraSystem  : órbita de seguimiento del avión (objetivo = posición).
+//   - Aircraft      : arma la pose del avión (actitud NED adaptada al modelo).
 //
 // Controles (ver InputHandler.h):
-//   - Arrastrar con botón IZQUIERDO : orbita (mover X = acimut, Y = elevación).
-//   - Arrastrar con botón DERECHO   : zoom (mover Y = acercar/alejar).
-//   - Escape                        : cierra la ventana.
+//   Mouse: botón IZQUIERDO orbita, botón DERECHO hace zoom (Práctico 05).
+//   Flechas: palanca (↑↓ elevador: ↑ nariz abajo / ↓ nariz arriba; ←→
+//   alerones); Q/E: pedales (timón); W/S: potencia. P: pausa (evento);
+//   L: wireframe (evento); ESC: salir.
+//
+// El ejecutable de prueba standalone del FDM vive en libs/dlfdm (make + ./build/
+// dlfdm-test): 60 s de simulación off-line para verificar el módulo aislado.
 //
 // El resto del esqueleto es idéntico a los prácticos anteriores (GLFW/GLAD,
 // ResourceManager, Shader, Mesh, depth test y la herramienta PPM comentada).
 // El main NO posee llamadas a glDelete*: liberar los recursos es
 // responsabilidad de los destructores de Shader, Mesh y Aircraft, que corren
-// dentro del bloque { } con el contexto OpenGL todavía vivo.
+// dentro del bloque { } con el contexto OpenGL todavía vivo. El FDM vive
+// FUERA de ese bloque (solo usa GLM), junto con cámara e input.
 // ============================================================================
 
-#include <cmath>            // std::sin
-#include <cstdlib>          // EXIT_FAILURE, EXIT_SUCCESS
-#include <fstream>          // captura temporal (PPM del back buffer)
+#include <algorithm>    // std::min
+#include <cstdlib>      // EXIT_FAILURE, EXIT_SUCCESS
+#include <fstream>      // captura temporal (PPM del back buffer)
 #include <iostream>
 #include <string>
 #include <vector>
@@ -43,6 +57,10 @@
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 
+#include <dlfdm/defines.h>
+#include <dlfdm/fdmsolver.h>
+#include <dlfdm/models/aircraft/jettrainer.h>
+
 #include "core/ResourceManager.h"
 #include "core/Shader.h"
 #include "core/Aircraft.h"
@@ -50,22 +68,29 @@
 #include "core/CameraCommand.h"
 #include "core/CameraSystem.h"
 #include "core/InputHandler.h"
+#include "core/FlightData.h"
 
-static const char* kWindowTitle     = "OpenGL - Practico 05: camara en la escena (orbita)";
+static const char* kWindowTitle     = "OpenGL - Practico 06: game loop, input y FDM";
 static constexpr int kWindowWidth   = 800;
 static constexpr int kWindowHeight  = 600;
 static constexpr int kGLVerMajor    = 4;
 static constexpr int kGLVerMinor    = 6;
 
-// Amplitud del cabeceo animado en radianes (≈25.8°).
-static constexpr float kPitchAmplitude = 0.45f;
+// Paso fijo de integración del FDM [s]: el constructor de FDMSolver usa el
+// mismo valor por defecto (1/120); acá queda explícito el del acumulador.
+static constexpr double kFixedDt = 1.0 / 120.0;
+// Tope del tiempo real acumulado por cuadro [s]: corta la divergencia del
+// acumulador después de pausas o al arrastrar la ventana (consigna, Parte 1).
+static constexpr double kMaxFrameDt = 0.25;
+// Escala visual del modelo (mide 1) para el mundo en metros: el S-211 real
+// mide ~9.6 m de largo -> legible a la distancia de cámara de seguimiento.
+static constexpr float kAircraftScale = 9.6f;
 
 static int glfw_error_code{};
 static std::string glfw_error_str{};
 
 static void error_callback(int error, const char *description);
 static void framebuffer_size_callback(GLFWwindow* window, int width, int height);
-static void processInput(GLFWwindow *window);
 static void print_gl_version(void);
 
 int main()
@@ -110,10 +135,26 @@ int main()
 
     print_gl_version();
 
-    // Colegir la cámara (CPU, sin OpenGL) ANTES del bloque de objetos de GPU:
-    // vive toda la vida de la ventana y el callback de resize la necesita.
+    // ========================================================================
+    // FASE 2: ESTADO CPU (sin OpenGL): cámara, input y el FDM.
+    //   El FDM solo usa GLM: se crea acá, antes del bloque de objetos de GPU.
+    // ========================================================================
     CameraSystem camara(kWindowWidth, kWindowHeight);
     InputHandler input;
+
+    // Modelo físico de la aeronave (S-211 "jet trainer" del repo dlfdm).
+    const dlfdm::AircraftParameters params = dlfdm::jettrainer::load_model();
+    // El paso de integración se fija ACÁ (por defecto vale dt = 1/120 s).
+    dlfdm::FDMSolver fdm(params);
+
+    // Condición inicial = equilibrio (trim) a 5000 m y 150 m/s (~540 km/h):
+    // estado en el solver y posiciones de los mandos en el InputHandler.
+    const dlfdm::TrimPoint trim = dlfdm::jettrainer::get_trim_condition(
+        dlfdm::jettrainer::TrimCondition::kISA5000TAS150);
+    fdm.setState(trim.state);
+    input.set_controls(trim.controls);
+    std::cout << "FDM listo: trim a 5000 [m] y 150 [m/s] TAS, paso "
+              << kFixedDt << " [s]." << std::endl;
 
     // Configuración base de GLFW (callbacks, vsync).
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
@@ -133,12 +174,14 @@ int main()
         // ----------------------------------------------------------------
         // ETAPA 1: crear la aeronave. init() genera sus 5 mallas y arma las
         //           7 piezas (locales y colores) UNA sola vez; el main solo
-        //           sabe que "hay una aeronave".
+        //           sabe que "hay una aeronave". Escala visual para el mundo
+        //           en metros (el modelo mide 1).
         // ----------------------------------------------------------------
         Aircraft avion;
         avion.init();
-        std::cout << "Aeronave inicializada (mallas subidas a la GPU)."
-                  << std::endl;
+        avion.set_scale(kAircraftScale);
+        std::cout << "Aeronave inicializada (mallas subidas a la GPU, escala "
+                  << kAircraftScale << ")." << std::endl;
 
         // ----------------------------------------------------------------
         // ETAPA 2: armar el programa de shaders y consultar sus uniforms
@@ -169,41 +212,87 @@ int main()
         glEnable(GL_DEPTH_TEST);
 
         // ----------------------------------------------------------------
-        // ETAPA 3: bucle de renderizado
-        //   En cada frame: leer mouse -> camara.update() -> avion.update()
-        //   -> avion.collect(items) -> setear uniforms -> dibujar.
-        //   items se recicla entre cuadros (collect() lo limpia y rellena).
+        // ETAPA 3: bucle de renderizado (paso fijo con acumulador, Parte 1)
         // ----------------------------------------------------------------
         std::vector<RenderItem> items;
         items.reserve(8);
 
+        // Sincronización con el reloj: el acumulador junta el tiempo real de
+        // cada cuadro y se consume en pasos fijos de kFixedDt. En el PRIMER
+        // cuadro acc = 0 -> no corre ningún paso (el avión arranca en el trim).
+        double antes = glfwGetTime();
+        double acc = 0.0;
+
+        // Eventos discretos (¿se acaba de apretar?): estado anterior por tecla
+        // para detectar el borde y alternar UNA vez por pulsación (consigna).
+        bool pause_on = false;   bool p_prev = false;
+        bool wire_on  = false;   bool l_prev = false;
+
         while (!glfwWindowShouldClose(window)) {
-            processInput(window);
+            glfwPollEvents();
+
+            const double ahora = glfwGetTime();
+            const double frame_dt = ahora - antes;
+            antes = ahora;
+
+            // ---- Eventos discretos: pausa (P) y wireframe (L) ----
+            const bool p_cur = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
+            if (p_cur && !p_prev) {
+                pause_on = !pause_on;
+                std::cout << (pause_on ? "[P] simulación PAUSADA."
+                                       : "[P] simulación reanudada.")
+                          << std::endl;
+            }
+            p_prev = p_cur;
+
+            const bool l_cur = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
+            if (l_cur && !l_prev) {
+                wire_on = !wire_on;
+                glPolygonMode(GL_FRONT_AND_BACK,
+                              wire_on ? GL_LINE : GL_FILL);
+                std::cout << (wire_on ? "[L] modo WIREFRAME."
+                                      : "[L] modo relleno.")
+                          << std::endl;
+            }
+            l_prev = l_cur;
+
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+                glfwSetWindowShouldClose(window, true);
+            }
+
+            // ---- Input (Parte 2): polling una vez por cuadro, FUERA del
+            //      while de pasos fijos (es un estado, no una acción). ----
+            input.update(window, static_cast<float>(frame_dt),
+                         camara.distance());
+
+            // ---- Acumulador de paso fijo (Parte 1 + Parte 3) ----
+            acc += std::min(frame_dt, kMaxFrameDt);
+            if (pause_on) {
+                // Congelado: se descarta el acumulador para que al reanudar no
+                // "pegue" el salto de todos los cuadros acumulados.
+                acc = 0.0;
+            } else {
+                // Un paso de simulación por cada dt acumulado. El FDM se
+                // actualiza con las posiciones de los mandos del cuadro.
+                while (acc >= kFixedDt) {
+                    fdm.update(input.controls());
+                    acc -= kFixedDt;
+                }
+            }
+
+            // ---- Último estado integrado -> escena (UNA vez por cuadro) ----
+            // getState() devuelve el estado YA integrado: se transforma NED ->
+            // mundo y se lo pasan al avión y a la cámara (que lo sigue).
+            const dlfdm::AircraftState& ned = fdm.getState();
+            const fp::FlightData vuelo = fp::to_world(ned);
+            const glm::vec3 angulos(vuelo.phi, vuelo.theta, vuelo.psi);
 
             glClearColor(51.0f / 256.0f, 55.0f / 256.0f, 76.0f / 256.0f, 1.0f);
             // Borrar también el buffer de profundidad en cada frame.
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // ---- Input: mouse (posición, no desplazamiento) -> cámara ----
-            double mouse_x = 0.0, mouse_y = 0.0;
-            glfwGetCursorPos(window, &mouse_x, &mouse_y);
-            const bool orbit_btn =
-                glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-            const bool zoom_btn =
-                glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            CameraCommand cmd;
-            input.poll(mouse_x, mouse_y, orbit_btn, zoom_btn, cmd);
-
-            // ---- Escena: cabeceo animado alrededor de la punta ----
-            const float t = static_cast<float>(glfwGetTime());
-            // El avión (largo 1, punta en su origen) se traslada para que su
-            // CENTRO quede en el origen del mundo: la cámara orbita ese punto.
-            const glm::vec3 posicion(-0.5f, 0.0f, 0.0f);
-            const glm::vec3 angulos(0.0f, kPitchAmplitude * std::sin(t), 0.0f);
-
-            // Posición (objetivo) y actitud (aún sin usar) de la aeronave.
-            camara.update(posicion, angulos, cmd);
-            avion.update(posicion, angulos);
+            camara.update(vuelo.position, angulos, input.camera_cmd());
+            avion.update(vuelo.position, angulos);
             avion.collect(items);
 
             shader.use();
@@ -218,7 +307,6 @@ int main()
             }
 
             glfwSwapBuffers(window);
-            glfwPollEvents();
 
             // Herramienta de verificación (comentada): para volcar un frame a
             // un PPM usar glReadPixels(GL_BACK) ANTES del swap, sin depender
@@ -234,7 +322,7 @@ int main()
             //    for (std::size_t i = 0, j = 0; i < buf.size(); i += 4, j += 3) {
             //        rgb[j] = buf[i]; rgb[j + 1] = buf[i + 1]; rgb[j + 2] = buf[i + 2];
             //    }
-            //    std::ofstream out("/tmp/opencode/tp5.ppm", std::ios::binary);
+            //    std::ofstream out("/tmp/opencode/tp6.ppm", std::ios::binary);
             //    out << "P6\n" << kWindowWidth << " " << kWindowHeight << "\n255\n";
             //    out.write(reinterpret_cast<const char*>(rgb.data()),
             //              static_cast<std::streamsize>(rgb.size()));
@@ -269,13 +357,6 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
     if (auto* camara =
             static_cast<CameraSystem*>(glfwGetWindowUserPointer(window))) {
         camara->set_viewport(width, height);
-    }
-}
-
-void processInput(GLFWwindow *window)
-{
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-        glfwSetWindowShouldClose(window, true);
     }
 }
 

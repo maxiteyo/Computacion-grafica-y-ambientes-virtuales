@@ -20,12 +20,17 @@
 // Sistema de referencia del avión (largo = 1):
 //   - Origen = punta de la nariz = punto de referencia del cabeceo (ref).
 //   - +X hacia la cola, +Y hacia el ala derecha (desde el piloto), +Z arriba.
-//   - angulos de update() = (roll, pitch, yaw) = rotaciones sobre X, Y y Z
-//     respectivamente. El cabeceo es la rotacion sobre el eje Y (eje paralelo
-//     al ala), que pasa por el punto de referencia en el origen.
-//   - pose_ = T(pos) · R(angulos) · T(−ref), con ref = (0,0,0) la punta,
-//     así que la rotación deja clavado el morro y balancea la cola (T(−ref) queda
-//     identidad, pero se mantiene explícito por la forma general).
+//   - angulos de update() = (phi, theta, psi) = actitud en el convenio
+//     aeroespacial (roll, pitch, yaw; ver FlightData.h). El módulo la adapta
+//     al referencial del modelo con una base CONSTANTE (ver Aircraft.cpp):
+//     la rotación final es  base_NED_gl · Rz(psi)·Ry(theta)·Rx(phi) ·
+//     base_modelo, así el avión vuela "de morro" y con las convenciones
+//     de signo físicas (rumbo 0 = −Z del mundo, pitch + = nariz arriba,
+//     roll + = ala derecha abajo). El cabeceo es la rotación sobre el eje Y
+//     (paralelo al ala) que pasa por el punto de referencia en el origen.
+//   - pose_ = T(pos) · R_avion · S(escala) · T(−ref), con ref = (0,0,0) la
+//     punta: la rotación deja clavado el morro y balancea la cola; la escala
+//     (por defecto 1, ver set_scale) amplía el modelo alrededor del ref.
 //   - Práctico 05: ya NO hay base de puesta en escena. La antigua base giraba el
 //     modelo para compensar la proyección 2D ("caja negra" uAjuste) y dejarlo en
 //     planta. Ahora la escena tiene una cámara orbital con perspectiva real
@@ -67,9 +72,16 @@ public:
     void init(void);
 
     // Recalcula la pose de la aeronave completa para este cuadro.
-    //   pos    : posición del punto de referencia (la punta) en el mundo.
-    //   angulos: (roll, pitch, yaw) en RADIANES, sobre X, Y y Z.
+    //   pos    : posición del punto de referencia (la punta) en el mundo [m].
+    //   angulos: actitud (phi, theta, psi) en RADIANES, convenio aeroespacial
+    //            (ver FlightData.h); la base del referencial la aplica el
+    //            módulo internamente.
     void update(const glm::vec3& pos, const glm::vec3& angulos);
+
+    // Escala visual uniforme del modelo alrededor del punto de referencia.
+    // El modelo mide 1; en el mundo en metros (Práctico 06) se usa ~9.6 para
+    // que el avión sea legible a la distancia de cámara de seguimiento.
+    void set_scale(float scale);
 
     // Escribe en "items" (borra el contenido previo) los ítems listos para
     // dibujar: cada uno referencia la malla de la pieza, su modelo->mundo YA
@@ -83,4 +95,5 @@ private:
     std::vector<glm::mat4>      locales_;       // transformación fija de cada pieza
     std::vector<glm::vec4>      colores_;       // color plano de cada pieza
     glm::mat4                   pose_{1.0f};    // pose de la aeronave (por cuadro)
+    float                       scale_ = 1.0f;  // escala visual (ver set_scale)
 };

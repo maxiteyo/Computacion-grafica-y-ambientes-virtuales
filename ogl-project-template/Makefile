@@ -7,10 +7,15 @@
 GLAD_DIR = ./third_party/glad
 include $(GLAD_DIR)/glad.mk
 
+# Modelo de dinámica de vuelo (FDM) del Práctico 06 (ver libs/dlfdm/README.md).
+DLFDM_DIR = ./libs/dlfdm
+include $(DLFDM_DIR)/dlfdm.mk
+
 # ------------------------------------------------------------------------------
 # Configurar includes paths
 INC_DIRS = \
     $(GLAD_INC_DIRS) \
+    $(DLFDM_INC_DIRS) \
     ./src \
     ./src/core
 
@@ -25,6 +30,7 @@ INC_DIRS = \
 #    ./src/input
 LIB_DIRS = \
     $(GLAD_LIB_DIRS) \
+    $(DLFDM_LIB_DIRS) \
     ./src/core
 
 # ------------------------------------------------------------------------------

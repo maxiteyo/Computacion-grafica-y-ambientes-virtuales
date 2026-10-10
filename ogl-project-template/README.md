@@ -1,8 +1,8 @@
-# Práctico 01, 02, 03, 04 y 05 — Intro a OpenGL, GLSL, la malla indexada y la cámara
+# Práctico 01, 02, 03, 04, 05 y 06 — OpenGL, GLSL, la malla indexada, la cámara y la simulación de vuelo (FDM)
 
 **Materia:** Computación gráfica y ambientes virtuales (0494)  
 **Institución:** Centro Regional Universitario Córdoba — IUA  
-**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026; rev. Práctico 05: 18-sep-2026)
+**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026; rev. Práctico 05: 18-sep-2026; rev. Práctico 06: 10-oct-2026)
 
 ---
 
@@ -26,6 +26,12 @@ Proyecto introductorio a OpenGL moderno (4.6 core profile) y GLSL, organizado en
   shader y se reemplaza por matrices de vista y proyección REALES (`uView`/`uProjection`):
   `CameraSystem` (órbita yaw/pitch/distancia + `perspective`) y `InputHandler` (mouse →
   `CameraCommand`), con la escena del P04 y controles con el mouse.
+- **Práctico 06:** game loop con acumulador de paso fijo + un MODELO DE DINÁMICA DE VUELO
+  (FDM). La aeronave deja de animarse con `sin(t)`: se integra con el módulo `libs/dlfdm`
+  (S-211 jet trainer) a `dt = 1/120 s`, arrancando en la condición de equilibrio (trim) a
+  5000 m y 150 m/s; el teclado pasa por rampas a las posiciones de los mandos
+  (`InputHandler: update/controls/set_controls`), y el estado NED del FDM se transforma al
+  mundo de la escena con `FlightData::to_world()` (única conversión de referenciales).
 
 ## Requisitos
 
@@ -41,10 +47,10 @@ ogl-project-template/
 ├── assets/
 │   └── shaders/
 │       ├── triangle.vs / triangle.fs   # Práctico 01 (triángulo)
-│       └── cube.vs / cube.fs           # Prácticos 02-05 (uModel/uView/uProjection/uColor)
+│       └── cube.vs / cube.fs           # Prácticos 02-06 (uModel/uView/uProjection/uColor)
 ├── src/
-│   ├── main.cpp                # Práctico 05: escena de la aeronave + cámara orbital
-│   ├── main_test.cpp           # Tests de ResourceManager + primitives + cámara (C++ puro)
+│   ├── main.cpp                # Práctico 06: game loop de paso fijo + FDM + cámara orbital
+│   ├── main_test.cpp           # Tests de RM + primitives + cámara + FDM/input (C++ puro)
 │   └── core/
 │       ├── MeshData.h          # Vertex + MeshData (tupla y malla lado CPU)
 │       ├── ResourceManager.h/.cpp   # Lectura/cacheo de fuentes de shaders
@@ -52,13 +58,16 @@ ogl-project-template/
 │       ├── Mesh.h/.cpp              # VAO/VBO/EBO (RAII, ownership)
 │       ├── Primitives.h/.cpp        # Generador de mallas (cube/cylinder/cone/sphere)
 │       ├── RenderItem.h              # Ítem listo para dibujar (mesh + model + color)
-│       ├── Aircraft.h/.cpp           # Aeronave S-211 (init/update/collect)
+│       ├── Aircraft.h/.cpp           # Aeronave S-211 (init/update/collect + set_scale)
 │       ├── CameraData.h              # view + projection (estructura compartida)
 │       ├── CameraCommand.h           # deltas de órbita (yaw/pitch/distancia)
 │       ├── CameraSystem.h/.cpp       # Cámara orbital: estado + view + projection
-│       └── InputHandler.h/.cpp       # Mouse (posición + botones) -> CameraCommand
+│       ├── InputHandler.h/.cpp       # Mouse + teclado -> CameraCommand y mandos del FDM
+│       └── FlightData.h/.cpp         # NED -> mundo (to_world: única transformación)
 ├── third_party/
 │   └── glad/                   # Loader de OpenGL (GLAD)
+├── libs/
+│   └── dlfdm/                  # FDM del Práctico 06 (Makefile.master propio; ver abajo)
 ├── build/                      # Objetos compilados
 ├── bin/                        # Ejecutables
 ├── Makefile
@@ -67,6 +76,12 @@ ogl-project-template/
 
 El `Makefile` ya tiene `./src/core` en `LIB_DIRS`: los nuevos `.cpp` se recolectan solos,
 no hay que tocar la compilación al agregar módulos.
+
+A partir del Práctico 06 el `Makefile` también incluye el FDM del repo con
+`DLFDM_DIR = ./libs/dlfdm` + `include $(DLFDM_DIR)/dlfdm.mk` (aporta `DLFDM_INC_DIRS` y
+`DLFDM_LIB_DIRS`): las 7 fuentes del módulo se compilan al proyecto con los mismos
+`-Wall -Wextra`, sin warnings. El módulo tiene su propio `Makefile.master` si se quiere
+compilar aislado (genera `build/dlfdm-test`: 60 s de vuelo off-line con `.csv`).
 
 Nota: el Makefile no rastrea dependencias de headers; al cambiar un `.h` conviene
 `touch` del `.cpp` asociado o `make clean` antes de recompilar.
@@ -82,10 +97,23 @@ make
 ### Tests (C++ puro, sin OpenGL)
 
 ```bash
-g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp src/core/ResourceManager.cpp \
-    src/core/CameraSystem.cpp src/core/InputHandler.cpp src/main_test.cpp -o test_rm
-./test_rm
+g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
+    libs/dlfdm/src/dlfdm/fdmsolver.cpp \
+    libs/dlfdm/src/dlfdm/aerodynamicsmodel.cpp \
+    libs/dlfdm/src/dlfdm/aircraftdynamics.cpp \
+    libs/dlfdm/src/dlfdm/propulsionmodel.cpp \
+    libs/dlfdm/src/dlfdm/models/aircraft/jettrainer.cpp \
+    libs/dlfdm/src/dlfdm/models/propulsion/turbofan.cpp \
+    libs/dlfdm/src/dlfdm/models/propulsion/turbojet.cpp \
+    src/core/Primitives.cpp src/core/ResourceManager.cpp \
+    src/core/CameraSystem.cpp src/core/InputHandler.cpp \
+    src/core/FlightData.cpp src/main_test.cpp -o /tmp/opencode/test_rm \
+    -lglfw -lpthread
+/tmp/opencode/test_rm
 ```
+
+(`InputHandler.cpp` lee el teclado por GLFW en `update()`, por eso `-lglfw` en el link;
+los 18 tests corren sin ventana ni GPU.)
 
 ## Ejecución
 
@@ -94,21 +122,215 @@ make run
 ```
 
 Abre una ventana de 800×600 que muestra la aeronave S-211 del Práctico 04 (7 piezas,
-7 colores, cabeceo `pitch = 0.45 · sin(t)` alrededor de la punta) pero vista por una
-**cámara orbital en PROYECCIÓN DE PERSPECTIVA**: la "caja negra" de los prácticos
-anteriores ya no existe, la cámara orbita el avión y el tamaño aparente depende de la
-distancia. Controles con el mouse:
+7 colores) volada por el **FDM en la condición de equilibrio (trim)** a 5000 m de altura y
+~150 m/s TAS (~540 km/h), con la cámara orbital del Práctico 05 siguiéndola en la escala
+del mundo en METROS (`CameraSystem` pasó a `near=5`/`far=30000` y distancia de órbita
+[30, 3000]; el modelo del avión, que mide 1, se escala visualmente con `set_scale(9.6)`).
+La vista inicial es de "chase" 3/4 a **60 m** (el avión se ve a una talla legible) y el
+zoom del mouse es **proporcional a la distancia** (mismo "paso" de zoom en 60 m que en
+2000 m; todo el rango de órbita se recorre en ~150 px de arrastre).
+Controles:
 
 | Control | Acción |
 |---------|--------|
 | Arrastrar con botón **izquierdo** | Órbita: mover en X = acimut (yaw), en Y = elevación (pitch) |
-| Arrastrar con botón **derecho** | Zoom: mover en Y = acercar/alejar la cámara |
+| Arrastrar con botón **derecho** | Zoom: arrastrar hacia **arriba** acerca, hacia abajo aleja (proporcional a la distancia) |
+| **↑ / ↓** | Palanca adelante/atrás → elevador (nariz abajo/arriba) |
+| **← / →** | Bastón izquierda/derecha → alerones (ala izquierda/derecha abajo) |
+| **Q / E** | Pedal izquierdo/derecho → timón (nariz izquierda/derecha) |
+| **W / S** | Subir / bajar potencia (al soltar, vuelve a la del trim) |
+| **P** | Pausa la simulación (la cámara sigue orbitando) |
+| **L** | Alterna wireframe / relleno |
 | `Escape` | Cierra la ventana |
 
+Al **soltar** cualquiera de las teclas de mandos (↑ ↓ ← → Q E W S) el mando **vuelve solo
+al trim** ("resorte"): la tecla mueve el mando mientras esté apretada y al soltarla la
+rama se afloja hacia la posición de equilibrio (`set_controls(trim.controls)`); el avión
+no queda girando solo con la deflexión retenida.
+
 El pitch de la órbita está acotado a ±0.9·π/2 (no se "tumba" la cámara) y la distancia a
-[2, 50] unidades (no atraviesa el avión ni lo pierde de vista). Al redimensionar la
+[30, 3000] metros (no atraviesa el avión ni lo pierde de vista). Al redimensionar la
 ventana, la proyección se recalcula con el nuevo aspect (el círculo sigue siendo
-círculo) y si se minimiza (alto 0) el aspect se se protege sin dividir por cero.
+círculo) y si se minimiza (alto 0) el aspect se protege sin dividir por cero.
+
+## Práctico 06 — Los cambios
+
+### El game loop: paso fijo con acumulador (Parte 1 de la consigna)
+
+El bucle de `main.cpp` ya no avanza el mundo con el tiempo del cuadro: se integra con un
+paso CONSTANTE y PEQUEÑO, y el tiempo real de cada cuadro se acumula hasta completar
+pasos discretos:
+
+```cpp
+const double dt = 1.0 / 120.0;       // paso de integración del FDM
+double acc = 0.0;
+while (...) {
+    glfwPollEvents();
+    double ahora = glfwGetTime();
+    double frame_dt = ahora - antes;  antes = ahora;
+
+    input.update(window, frame_dt, camara.distance());  // 1) entrada UNA vez por cuadro
+
+    acc += std::min(frame_dt, 0.25);  // 2) acumular (tope: 0.25 s)
+    while (acc >= dt) {               // 3) consumir pasos fijos
+        fdm.update(input.controls()); //    (el FDM ya integra con su dt)
+        acc -= dt;
+    }
+    // 4) getState() UNA vez por cuadro -> escena
+    const auto& ned = fdm.getState();
+    ...
+}
+```
+
+- **Errores acotados y deterministas**: el error de cada paso no depende de qué tan
+  rápido corra la máquina (misma velocidad con o sin vsync: solo cambia la cantidad de
+  pasos por cuadro, nunca el paso en sí).
+- **El acumulador no se descarta**: lo que sobra tras un paso (resto < dt) se conserva
+  para el cuadro siguiente (tiempo simulado + resto = tiempo de reloj).
+- **Tope de 0.25 s por cuadro**: si un cuadro tarda mucho (arrastrar la ventana, pausa
+  del depurador con el proceso congelado), se simulan como máximo ~30 pasos y la app
+  sigue viva: al volver el cuadro no hay "explosión" de pasos acumulados.
+- **La entrada está FUERA del `while` de pasos**: el teclado/mouse es un ESTADO ("¿está
+  apretada ahora?"), no una acción; el FDM recibe las mismas posiciones de mandos en
+  todos los pasos del cuadro, sin depender del número de pasos.
+- **`getState()` se consulta UNA vez por cuadro** (Parte 3 de la consigna): el estado ya
+  integrado se transforma a la escena y se reparte a cámara y avión.
+
+### El FDM entra al proyecto (`libs/dlfdm`)
+
+- El módulo del repositorio (S-211 jet trainer, modelado con la tabla de estabilidad del
+  Aermacchi S-211 real) vive en `libs/dlfdm` y se integra con
+  `DLFDM_DIR = ./libs/dlfdm` + `include $(DLFDM_DIR)/dlfdm.mk` en el `Makefile`: sus
+  7 fuentes se compilan al proyecto con `-Wall -Wextra` (cero warnings) y sin colisiones
+  de objetos (`Makefile.master` genera objetos `notdir` en `build/`).
+- **Condición inicial = equilibrio (trim)** (Parte 3): se pide con
+  `jettrainer::get_trim_condition(kISA5000TAS150)` — el estado que hace que la aeronave
+  vuele en línea recta nivelada a 5000 m / 150 m/s TAS — y se aplica con
+  `fdm.setState(trim.state)`; las posiciones de los mandos del trim (elevador −5.37°,
+  potencia ~0.50) se fijan en el `InputHandler` con `set_controls(trim.controls)`.
+- **Interfaz usada por el proyecto**: `FDMSolver::update(ControlInputs)` (nada de
+  métodos físicos internos) y `FDMSolver::getState()` devuelve un `AircraftState` NED
+  (x=norte, y=este, z=abajo) con la actitud aeroespacial `(phi, theta, psi)`.
+
+### `FlightData` — la ÚNICA transformación NED → mundo
+
+`FlightData.h/.cpp` es la frontera entre los dos mundos: entrada `dlfdm::AircraftState`,
+salida lo que consume la escena.
+
+- **Posición** — exactamente la fórmula de la consigna, negando DOS ejes (nunca uno, que
+  daría una reflexión y un mundo espejado):
+  `position = (ned.y, −ned.z, −ned.x)` → x=este, y=arriba, z=−norte.
+- **Actitud** — decisión documentada: `to_world()` devuelve `(phi, theta, psi)` del NED
+  TAL CUAL. El "sign-copy" de la consigna (`−φ, θ, −ψ`) presupone un modelo de escena
+  con el morro en **+X**; el de este proyecto (Práctico 04) tiene el morro en **−X**.
+  En vez de copiar signos (que con este modelo no representan ningún ángulo válido) se
+  aplica una base CONSTANTE al componer la rotación en `Aircraft` (ver abajo): el
+  resultado visual es el mismo que busca la consigna (rumbo 0 = morro a −Z, pitch + =
+  nariz arriba, roll + = ala derecha abajo), sin extraer ángulos equivalentes (que
+  degenera en ciertas actitudes).
+- `to_world_basis()` es la fuente ÚNICA de esa base (la usan `to_world`,
+  `forward_world` y `Aircraft`); `forward_world()` es una consulta auxiliar (dirección
+  del morro, verificada en los tests y útil para la futura vista de cabina).
+
+### `Aircraft` — escala en metros y la base del referencial
+
+- `set_scale(float)`: el modelo mide 1; en el mundo en metros se usa `set_scale(9.6)`.
+  La pose pasa a `T(pos) · R_avion · S(escala) · T(−ref)`.
+- `update()` compone la rotación como
+  `R_avion = fp::to_world_basis() · Rz(psi)·Ry(theta)·Rx(phi) · kBaseModelo`, donde
+  `Rz·Ry·Rx` es la rotación cuerpo→NED del convenio aeroespacial (Stevens-Lewis: el
+  rumbo/cabeceo definen la dirección del morro, el roll positivo baja el ala derecha) y
+  `kBaseModelo = diag(−1,+1,−1)` adapta el referencial del cuerpo (+X morro, +Z abajo)
+  al del modelo geométrico (morro −X, +Z arriba). El avión vuela "de morro": sin base de
+  puesta en escena 2D del P04 — esta base es la conversión de referenciales, constante.
+
+### `InputHandler` — el teclado se vuelve mandos de la aeronave
+
+Se conserva el mouse → `CameraCommand` del P05 y se agrega:
+
+- `update(GLFWwindow*, float dt, float camera_distance = 150)`: polling completo una vez
+  por cuadro (mouse + teclado). El tercer parámetro es la distancia actual de la cámara:
+  el zoom del mouse es **proporcional** (`dist_delta = dy · kZoomGain · distancia`, con
+  `kZoomGain = 0.03` = 3 % de la distancia por px) porque la escena está en metros
+  (con la ganancia absoluta del P05, acercarse del todo exigía arrastrar miles de px).
+  Convención: arrastrar hacia **arriba** acerca (dy < 0 → dist_delta < 0).
+- `controls()` → `dlfdm::ControlInputs` (elevador, alerón, timón en rad y potencia en
+  [0,1]): lo único que consume el FDM.
+- `set_controls(c)`: fija la posición inicial de los mandos (el trim de la Parte 3),
+  inicializa las rampas internas para que partan de ahí y memoriza ese punto como la
+  "casa" del resorte.
+- `update_sticks(...)`: la lógica pura de mandos (C++ puro, testeable): cada tecla mueve
+  la palanca/pedales y fija la VELOCIDAD de cambio de un eje normalizado
+  (`eje_ ±= rate·dt`, `rate = 1.0 /s`; potencia `0.75 /s`), que luego se mapea al tope de
+  la superficie. **Al soltar la tecla el mando VUELVE a la posición del trim** (resorte,
+  `rate = 2.5 /s`; potencia `1.25 /s`): las rampas se aflojan hacia el punto memorizado
+  por `set_controls()` (sin trim, hacia el neutro 0). Con esto el avión no queda girando
+  solo tras un "tap" corto — antes de ajustarlo, la tecla soltada MANTENÍA la deflexión y
+  un toque de 0,3 s dejaba ~60 % del mando retenido para siempre (el FDM entraba en una
+  espiral cada vez más rápida).
+
+| Tecla | Eje | Deflexión que produce (jettrainer) |
+|-------|-----|--------------------------------------|
+| ↑ / ↓ | elevador | +15° (nariz abajo) / −25° (nariz arriba) |
+| ← / → | alerones | −20° / +20° (ala izq./der. abajo) |
+| Q / E | timón | +30° / −30° (nariz izq./der.) |
+| W / S | potencia | sube / baja en [0, 1] |
+
+Con el bastón en el neutro (eje 0) la deflexión es 0; el trim del FDM queda como una
+deflexión previa (elevador −5.37°, potencia ~0.50; alerón y timón en 0): desde ahí
+parte la rampa al tocar una tecla y a AHÍ vuelve el mando al soltarla.
+
+### Eventos discretos (P y L)
+
+El teclado vuelve a ser "estado o evento": la posición de un mando es estado (queda
+apretada), pero pausar / cambiar el modo de dibujo es un EVENTO (una acción que solo
+debe pasar UNA vez por pulsación). En `main.cpp` se detecta el borde con el estado de la
+tecla del cuadro anterior:
+
+```cpp
+bool p_prev = false;
+// en el bucle:
+bool p_cur = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
+if (p_cur && !p_prev) pause_on = !pause_on;   // flanco: alterna UNA vez
+p_prev = p_cur;
+```
+
+- **P → pausa**: congela la integración (`acc = 0` para que al reanudar no "pegue"
+  todos los pasos acumulados) pero la cámara sigue orbitando (sigue a un avión inmóvil).
+- **L → wireframe**: alterna `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE/GL_FILL)`.
+
+### Verificación
+
+- **Tests (18, C++ puro)**: los 15 del P05 más:
+  - **16** `FlightData`: `to_world` (posición x=este/y=arriba/z=−norte) y
+    `forward_world` (morro alineado con el vuelo: rumbo 0 → −Z, rumbo 90 → +X, el
+    alabeo no cambia la dirección del morro).
+  - **17** FDM real: integrando 60 s desde el trim sin tocar mandos, la altura queda en
+    5000 ± 25 m y la TAS en ~150 ± 2 m/s (la aeronave mantiene el equilibrio).
+  - **18** `InputHandler`: rampas por velocidad, topes de cada superficie (jettrainer),
+    potencia acotada a [0,1], **soltar la tecla devuelve el mando al trim** (resorte,
+    sin pasarse) y `set_controls()` arranca desde el trim y fija la "casa" del resorte.
+- **Misma velocidad con o sin vsync**: `glfwSwapInterval(1)` en `make run`; cambiar a 0
+  en `main.cpp` y recompilar → la posición/actitud del avión en un momento dado es la
+  misma (el paso fijo no depende del rate de cuadros).
+- **Sin teclas, mantiene altura y velocidad**: Test 17 (numérico) + la app arranca en
+  el trim y no se toca nada → el avión sigue recto y nivelado (el morro no cambia).
+- **Deflexión sostenida** (tecla sostenida): el avión rota en el eje y sentido correctos
+  (↓ → palanca atrás → nariz arriba con elevador negativo; ↑ → palanca adelante → nariz
+  abajo con elevador positivo; roll con alerones; giro con el timón). Al **soltar**, los
+  mandos vuelven al trim (Test 18) y el FDM deja de recibir
+  deflexión: verificado también numéricamente contra el comportamiento anterior — con la
+  deflexión retenida (antes) un alerón sostenido llegaba a φ ≈ −9356° en 30 s (espiral
+  divergente, giraba cada vez más rápido); con el resorte, tras un toque de 0,3 s el
+  cabeceo vuelve solo al nivel y el alabeo queda acotado y sin acelerar (espiral neutra
+  propia del modelo, igual que en un avión real sin piloto automático).
+- **Tamaño del modelo en cámara**: con la vista inicial de 60 m una captura PPM da el
+  avión en 118×87 px (a los 150 m de antes quedaba en 44×32 px) y el zoom proporcional
+  del mouse recorre todo el rango [30, 3000] m en ~150 px de arrastre.
+- **Arrastrar la ventana / pausa del depurador**: el tope de 0.25 s evita la divergencia
+  del acumulador; al soltar la ventana la simulación continúa sin saltos.
+- **Comando discreto una vez por pulsación**: la detección de borde (P, L) alterna una
+  sola vez aunque se sostenga la tecla.
 
 ## Práctico 05 — Los cambios
 
@@ -173,7 +395,10 @@ glfwGetCursorPos(window, &x, &y);          // POSICIÓN, no desplazamiento
 
 - Botón **izquierdo** (órbita): `dx → yaw_delta`, `dy → pitch_delta` (ganancia
   `0.005 rad/px`).
-- Botón **derecho** (zoom): `dy → dist_delta` (ganancia `0.02 unidades/px`). El mouse
+- Botón **derecho** (zoom): `dy → dist_delta` proporcional a la distancia actual
+  (`kZoomGain = 0.03` = 3 %/px) — en el mundo METROS del P06 una ganancia absoluta haría
+  el zoom imperceptible (para acercarse del todo habría que arrastrar miles de px).
+  Arrastrar hacia arriba (dy < 0) acerca. El mouse
   es 2D y la órbita 3D: el tercer control entra con el segundo botón.
 - **Primer cuadro**: no hay posición anterior → `delta = 0` (`first_ = true`), así la
   cámara no "salta" al empezar. Después `delta = actual - anterior` acumulado.
@@ -462,7 +687,19 @@ El archivo `src/main_test.cpp` verifica:
 ## Compila sin warnings
 
 ```bash
-g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp src/core/ResourceManager.cpp src/main_test.cpp -o test_rm
+g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
+    libs/dlfdm/src/dlfdm/fdmsolver.cpp \
+    libs/dlfdm/src/dlfdm/aerodynamicsmodel.cpp \
+    libs/dlfdm/src/dlfdm/aircraftdynamics.cpp \
+    libs/dlfdm/src/dlfdm/propulsionmodel.cpp \
+    libs/dlfdm/src/dlfdm/models/aircraft/jettrainer.cpp \
+    libs/dlfdm/src/dlfdm/models/propulsion/turbofan.cpp \
+    libs/dlfdm/src/dlfdm/models/propulsion/turbojet.cpp \
+    src/core/Primitives.cpp src/core/ResourceManager.cpp \
+    src/core/CameraSystem.cpp src/core/InputHandler.cpp \
+    src/core/FlightData.cpp src/main_test.cpp -o /tmp/opencode/test_rm \
+    -lglfw -lpthread
+/tmp/opencode/test_rm        # 18 tests
 make
 ```
 

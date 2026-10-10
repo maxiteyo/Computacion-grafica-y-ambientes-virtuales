@@ -22,14 +22,35 @@
 
 #include <cstddef>
 
-#include <glm/gtc/matrix_transform.hpp>  // translate, rotate, radians
+#include <glm/gtc/matrix_transform.hpp>  // translate, rotate, scale, radians
 
+#include "FlightData.h"   // fp::to_world_basis (única base NED -> mundo)
 #include "Primitives.h"
 
 namespace {
 
 // Punto de referencia de la aeronave = punta de la nariz (origen local).
 constexpr glm::vec3 kRef{0.0f, 0.0f, 0.0f};
+
+// ---------------------------------------------------------------------------
+// Base del MODELO: transformación del referencial del cuerpo (aeroespacial:
+// +X morro, +Y ala derecha, +Z abajo) al referencial geométrico de este
+// modelo (morro en −X, +Y ala derecha, +Z arriba). Es decir, cuánto "se
+// desvía" el modelo respecto del cuerpo: el morro apunta a −X del modelo y
+// "arriba" del modelo es −Z del cuerpo.
+//   v_cuerpo = diag(−1, +1, −1) · v_modelo
+// La rotación final de la escena es:
+//   R_avion = base_NED_mundo · R_cuerpo_a_NED(phi,theta,psi) · base_modelo
+//            (fp::to_world_basis)   (Rz·Ry·Rx, FlightData.cpp)     (esta)
+// de modo que el avión del FDM (que vuela "de morro") quede alineado con su
+// modelo, y la misma base NED -> mundo que usa to_world() para la posición.
+// Ver FlightData.h/cpp: esta base es la contracara de forward_world().
+// ---------------------------------------------------------------------------
+const glm::mat4 kBaseModelo(
+    glm::vec4(-1.0f, 0.0f, 0.0f, 0.0f),   // col 0: +X del cuerpo = −X del modelo
+    glm::vec4( 0.0f, 1.0f, 0.0f, 0.0f),   // col 1: +Y del cuerpo = +Y del modelo
+    glm::vec4( 0.0f, 0.0f, -1.0f, 0.0f),  // col 2: +Z del cuerpo = −Z del modelo
+    glm::vec4( 0.0f, 0.0f, 0.0f, 1.0f));
 
 }  // namespace
 
@@ -102,24 +123,38 @@ void Aircraft::init(void)
 
 void Aircraft::update(const glm::vec3& pos, const glm::vec3& angulos)
 {
-    // 1) Rotaciones de la aeronave en SU propio referencial (radianes).
-    //    model = T(pos) · R(roll, pitch, yaw) · T(−ref)
-    //    GLM columna-mayor: el último factor se aplica primero al vértice.
-    const glm::mat4 R_avion =
-        glm::rotate(glm::mat4(1.0f), angulos.x, glm::vec3(1.0f, 0.0f, 0.0f)) *
-        glm::rotate(glm::mat4(1.0f), angulos.y, glm::vec3(0.0f, 1.0f, 0.0f)) *
-        glm::rotate(glm::mat4(1.0f), angulos.z, glm::vec3(0.0f, 0.0f, 1.0f));
+    // 1) Rotación cuerpo -> NED del convenio aeroespacial (Rz·Ry·Rx; GLM
+    //    column-major: Rx se aplica primero al vértice). Con esta convención
+    //    el rumbo y el cabeceo definen la dirección del morro (independiente
+    //    del alabeo) y el roll positivo baja el ala derecha.
+    //    (Misma convención que FlightData.cpp / dlfdm::getModelMatrix.)
+    const glm::mat4 Rz = glm::rotate(glm::mat4(1.0f), angulos.z,
+                                     glm::vec3(0.0f, 0.0f, 1.0f));
+    const glm::mat4 Ry = glm::rotate(glm::mat4(1.0f), angulos.y,
+                                     glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::mat4 Rx = glm::rotate(glm::mat4(1.0f), angulos.x,
+                                     glm::vec3(1.0f, 0.0f, 0.0f));
+    const glm::mat4 R_cuerpo = Rz * Ry * Rx;
 
-    // 2) SIN base de puesta en escena (Práctico 05): la antigua base existía
-    //    para compensar la proyección 2D de la "caja negra" (uAjuste), que
-    //    dibujaba solo el plano XY. Ahora la escena tiene una cámara orbital
-    //    real con perspectiva (CameraSystem): el avión se muestra en su
-    //    referencial NATURAL (morro hacia −X, +Y ala derecha, +Z arriba) y es
-    //    la cámara la que elige el ángulo de vista al orbitar. R = R_avion.
-    const glm::mat4 R = R_avion;
+    // 2) La pose completa adapta la actitud del cuerpo al referencial del
+    //    modelo (kBaseModelo) y al mundo (fp::to_world_basis, misma base que
+    //    usa to_world() para la posición):
+    //        R_avion = base_NED_mundo · R_cuerpo(NED) · base_modelo
+    //    de modo que el avión vuela "de morro": con rumbo 0 (norte) apunta a
+    //    −Z del mundo, con pitch + sube la nariz y con roll + baja el ala
+    //    derecha. NO hay base de "puesta en escena 2D" (Práctico 05): esta
+    //    base es la conversión de referenciales NED -> escena, constante.
+    const glm::mat4 R_avion = fp::to_world_basis() * R_cuerpo * kBaseModelo;
 
-    pose_ = glm::translate(glm::mat4(1.0f), pos) * R
+    // 3) model = T(pos) · R_avion · S(escala) · T(−ref)
+    pose_ = glm::translate(glm::mat4(1.0f), pos) * R_avion
+          * glm::scale(glm::mat4(1.0f), glm::vec3(scale_))
           * glm::translate(glm::mat4(1.0f), -kRef);
+}
+
+void Aircraft::set_scale(float scale)
+{
+    scale_ = scale;
 }
 
 void Aircraft::collect(std::vector<RenderItem>& items) const
