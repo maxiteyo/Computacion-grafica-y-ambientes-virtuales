@@ -103,36 +103,20 @@ void Aircraft::init(void)
 void Aircraft::update(const glm::vec3& pos, const glm::vec3& angulos)
 {
     // 1) Rotaciones de la aeronave en SU propio referencial (radianes).
-    //    model = T(pos) · base · R(roll, pitch, yaw) · T(−ref)
+    //    model = T(pos) · R(roll, pitch, yaw) · T(−ref)
     //    GLM columna-mayor: el último factor se aplica primero al vértice.
     const glm::mat4 R_avion =
         glm::rotate(glm::mat4(1.0f), angulos.x, glm::vec3(1.0f, 0.0f, 0.0f)) *
         glm::rotate(glm::mat4(1.0f), angulos.y, glm::vec3(0.0f, 1.0f, 0.0f)) *
         glm::rotate(glm::mat4(1.0f), angulos.z, glm::vec3(0.0f, 0.0f, 1.0f));
 
-    // 2) BASE FIJA DE PUESTA EN ESCENA (vista TRES CUARTOS ~3/4). El pipeline
-    //    proyecta al plano XY de pantalla y el +Z solo participa del test de
-    //    profundidad, así que una inclinación sobre X por sí sola NUNCA le da
-    //    ancho a la deriva (su placa es chata en Y del avión -> sigue siendo un
-    //    filete vertical). Para verla de frente (algo) hace falta un GIRO en Y:
-    //      - Rz(-90°) primero: plan view clásico (morro "arriba" de pantalla,
-    //        +Y del avión = derecha; +X del avión = abajo).
-    //      - Ry(+50°) después: "gira" el plano hacia el espectador ~50° (como
-    //        abrir un libro). El +Z del avión (la altura de la DERIVA) pasa a
-    //        ancho de pantalla -> el timón queda como una aleta roja parada en
-    //        la cola; las alas y estabilizadores se acortan un poco (3/4) pero
-    //        siguen horizontales, y el morro (ref) no se mueve.
-    //      - Rx(-25°) por último: pequeña ELEVACIÓN de la vista (se ve el lomo
-    //        y el empenaje desde arriba, "más de costado").
-    const float kGiroY     = glm::radians(50.0f);   // 3/4 hacia el espectador
-    const float kElevacion = glm::radians(-25.0f);  // se ve desde arriba
-    const glm::mat4 base =
-        glm::rotate(glm::mat4(1.0f), kElevacion, glm::vec3(1.0f, 0.0f, 0.0f)) *
-        glm::rotate(glm::mat4(1.0f), kGiroY, glm::vec3(0.0f, 1.0f, 0.0f)) *
-        glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f),
-                    glm::vec3(0.0f, 0.0f, 1.0f));
-
-    const glm::mat4 R = base * R_avion;
+    // 2) SIN base de puesta en escena (Práctico 05): la antigua base existía
+    //    para compensar la proyección 2D de la "caja negra" (uAjuste), que
+    //    dibujaba solo el plano XY. Ahora la escena tiene una cámara orbital
+    //    real con perspectiva (CameraSystem): el avión se muestra en su
+    //    referencial NATURAL (morro hacia −X, +Y ala derecha, +Z arriba) y es
+    //    la cámara la que elige el ángulo de vista al orbitar. R = R_avion.
+    const glm::mat4 R = R_avion;
 
     pose_ = glm::translate(glm::mat4(1.0f), pos) * R
           * glm::translate(glm::mat4(1.0f), -kRef);

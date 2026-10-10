@@ -1,24 +1,30 @@
 // ============================================================================
-// main.cpp — Práctico 04: aeronave compuesta (módulo Aircraft + RenderItem)
+// main.cpp — Práctico 05: cámara en la escena (CameraSystem + InputHandler)
 //
-// La escena del Práctico 03 (grilla 2x2) se reemplaza por UNA sola aeronave
-// (S-211 estilizado) compuesta por primitivas del P03 y agrupada en el módulo
-// Aircraft. El main NO conoce las piezas del avión: por cuadro solo
-//   1. avion.update(pos, angulos)  -> fija la pose de la aeronave (cabeceo)
-//   2. avion.collect(items)        -> "suelta" los RenderItem listos (7)
-//   3. por cada RenderItem          -> setea uModel/uColor y dibuja la malla
-// El cabeceo se anima con el reloj (pitch = amplitud * sin(t)): es la rotación
-// sobre el eje Y (paralelo al ala) que pasa por el punto de referencia de la
-// aeronave (la punta de la nariz), así que el morro queda clavado y la cola
-// balancea.
+// La escena es la aeronave del Práctico 04 (Aircraft + RenderItem), pero la
+// visualización deja de usar la "caja negra" (uniform uAjuste, un escalado que
+// corregía el aspecto y daba vuelta el eje z SIN perspectiva) y pasa a una
+// PROYECCIÓN DE PERSPECTIVA real armada por CameraSystem:
+//   gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0)
 //
-// El resto del esqueleto es idéntico al Práctico 03:
-//   - ResourceManager : lee y cachea el código fuente de los shaders.
-//   - Shader          : compila/linkea el programa y setea uniforms (DSA).
-//   - Mesh            : sube cada malla a la GPU y arma VAO/VBO/EBO.
-//   - uAjuste         : "caja negra" (ajuste por aspecto de la ventana de 800x600).
-//   - prompt de normales: los fragmentos se pintan con uColor (vec4) plano.
+// Módulos por responsabilidad (arquitectura de la cátedra):
+//   - CameraSystem : estado de la órbita (yaw/pitch/distancia) + view +
+//                    projection. No lee el mouse ni sabe cómo es la escena:
+//                    solo recibe el punto objetivo y un CameraCommand.
+//   - InputHandler : lee el mouse (posición + botones) una vez por cuadro
+//                    (polling) y lo convierte a CameraCommand.
+//   - Aircraft     : arma la pose del avión por cuadro (sin base: la cámara
+//                    elige el ángulo de vista, el modelo está en su
+//                    referencial natural: morro −X, +Y ala derecha, +Z arriba).
+//   - main         : orquesta: input -> cámara -> avión -> uniforms -> draw.
 //
+// Controles (ver InputHandler.h):
+//   - Arrastrar con botón IZQUIERDO : orbita (mover X = acimut, Y = elevación).
+//   - Arrastrar con botón DERECHO   : zoom (mover Y = acercar/alejar).
+//   - Escape                        : cierra la ventana.
+//
+// El resto del esqueleto es idéntico a los prácticos anteriores (GLFW/GLAD,
+// ResourceManager, Shader, Mesh, depth test y la herramienta PPM comentada).
 // El main NO posee llamadas a glDelete*: liberar los recursos es
 // responsabilidad de los destructores de Shader, Mesh y Aircraft, que corren
 // dentro del bloque { } con el contexto OpenGL todavía vivo.
@@ -41,8 +47,11 @@
 #include "core/Shader.h"
 #include "core/Aircraft.h"
 #include "core/RenderItem.h"
+#include "core/CameraCommand.h"
+#include "core/CameraSystem.h"
+#include "core/InputHandler.h"
 
-static const char* kWindowTitle     = "OpenGL - Practico 04: aeronave (Aircraft + RenderItem)";
+static const char* kWindowTitle     = "OpenGL - Practico 05: camara en la escena (orbita)";
 static constexpr int kWindowWidth   = 800;
 static constexpr int kWindowHeight  = 600;
 static constexpr int kGLVerMajor    = 4;
@@ -101,9 +110,19 @@ int main()
 
     print_gl_version();
 
+    // Colegir la cámara (CPU, sin OpenGL) ANTES del bloque de objetos de GPU:
+    // vive toda la vida de la ventana y el callback de resize la necesita.
+    CameraSystem camara(kWindowWidth, kWindowHeight);
+    InputHandler input;
+
     // Configuración base de GLFW (callbacks, vsync).
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSwapInterval(1);
+
+    // El callback de GLFW es una función, no un método: para que llegue a la
+    // cámara se guarda el puntero al objeto como "user pointer" de la ventana
+    // (glfwSetWindowUserPointer) y se recupera adentro del callback.
+    glfwSetWindowUserPointer(window, &camara);
 
     // ========================================================================
     // COMIENZO DEL BLOQUE QUE POSEÉ LOS OBJETOS DE GPU (raspado en { })
@@ -138,28 +157,22 @@ int main()
         }
 
         // Ubicaciones consultadas UNA vez y luego reutilizadas en el bucle.
-        const int locModel  = shader.loc("uModel");
-        const int locColor  = shader.loc("uColor");
-        const int locAjuste = shader.loc("uAjuste");
-
-        // Matriz de ajuste de la "caja negra" (aspecto de la ventana 800x600).
-        const glm::mat4 uAjuste =
-            glm::scale(glm::mat4(1.0f), glm::vec3(
-                static_cast<float>(kWindowHeight) / static_cast<float>(kWindowWidth),
-                1.0f, -1.0f));
+        const int locModel      = shader.loc("uModel");
+        const int locView       = shader.loc("uView");
+        const int locProjection = shader.loc("uProjection");
+        const int locColor      = shader.loc("uColor");
 
         shader.use();
-        shader.set_uniform(locAjuste, uAjuste);  // se setea una sola vez
 
         // Habilitar el test de profundidad para que las piezas (y las caras de
-        // cada pieza) se oculten entre sí de forma coherente (caja negra).
+        // cada pieza) se oculten entre sí de forma coherente.
         glEnable(GL_DEPTH_TEST);
 
         // ----------------------------------------------------------------
         // ETAPA 3: bucle de renderizado
-        //   En cada frame: avion.update() -> avion.collect(items) -> dibujar.
+        //   En cada frame: leer mouse -> camara.update() -> avion.update()
+        //   -> avion.collect(items) -> setear uniforms -> dibujar.
         //   items se recicla entre cuadros (collect() lo limpia y rellena).
-        //   Nada de regenerar mallas ni de releer shaders dentro del bucle.
         // ----------------------------------------------------------------
         std::vector<RenderItem> items;
         items.reserve(8);
@@ -171,20 +184,31 @@ int main()
             // Borrar también el buffer de profundidad en cada frame.
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // Animación del cabeceo alrededor de la punta (punto de referencia
-            // de la aeronave): la rotación es sobre el eje Y del avión (paralelo
-            // al ala). El avión se dibuja en vista TRES CUARTOS con el morro
-            // "arriba" de la pantalla (base fija en Aircraft::update): el largo 1
-            // del fuselaje ocupa y ∈ [-0.5, 0.5], las alas quedan horizontales
-            // (izq-der) y la DERIVA se ve parada en la cola.
+            // ---- Input: mouse (posición, no desplazamiento) -> cámara ----
+            double mouse_x = 0.0, mouse_y = 0.0;
+            glfwGetCursorPos(window, &mouse_x, &mouse_y);
+            const bool orbit_btn =
+                glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            const bool zoom_btn =
+                glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+            CameraCommand cmd;
+            input.poll(mouse_x, mouse_y, orbit_btn, zoom_btn, cmd);
+
+            // ---- Escena: cabeceo animado alrededor de la punta ----
             const float t = static_cast<float>(glfwGetTime());
-            const glm::vec3 posicion(0.0f, 0.5f, 0.0f);  // centra el largo 1
+            // El avión (largo 1, punta en su origen) se traslada para que su
+            // CENTRO quede en el origen del mundo: la cámara orbita ese punto.
+            const glm::vec3 posicion(-0.5f, 0.0f, 0.0f);
             const glm::vec3 angulos(0.0f, kPitchAmplitude * std::sin(t), 0.0f);
 
+            // Posición (objetivo) y actitud (aún sin usar) de la aeronave.
+            camara.update(posicion, angulos, cmd);
             avion.update(posicion, angulos);
             avion.collect(items);
 
             shader.use();
+            shader.set_uniform(locView, camara.data().view);
+            shader.set_uniform(locProjection, camara.data().projection);
             for (const auto& item : items) {
                 shader.set_uniform(locModel, item.model);
                 shader.set_uniform(locColor, item.color);
@@ -210,7 +234,7 @@ int main()
             //    for (std::size_t i = 0, j = 0; i < buf.size(); i += 4, j += 3) {
             //        rgb[j] = buf[i]; rgb[j + 1] = buf[i + 1]; rgb[j + 2] = buf[i + 2];
             //    }
-            //    std::ofstream out("/tmp/opencode/tp4.ppm", std::ios::binary);
+            //    std::ofstream out("/tmp/opencode/tp5.ppm", std::ios::binary);
             //    out << "P6\n" << kWindowWidth << " " << kWindowHeight << "\n255\n";
             //    out.write(reinterpret_cast<const char*>(rgb.data()),
             //              static_cast<std::streamsize>(rgb.size()));
@@ -234,10 +258,18 @@ void error_callback(int error, const char *description)
     glfw_error_str = std::string(description);
 }
 
-void framebuffer_size_callback([[maybe_unused]] GLFWwindow* window,
-                               int width, int height)
+void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
+    // El tamaño del framebuffer lo cambia el sistema de ventanas, no OpenGL:
+    //   - glViewport define el rectángulo de píxeles donde se mapean las
+    //     coordenadas normalizadas;
+    //   - camara.set_viewport() recalcula la PROYECCIÓN para el nuevo aspect
+    //     (la cámara llegó por el user pointer guardado en el main).
     glViewport(0, 0, width, height);
+    if (auto* camara =
+            static_cast<CameraSystem*>(glfwGetWindowUserPointer(window))) {
+        camara->set_viewport(width, height);
+    }
 }
 
 void processInput(GLFWwindow *window)

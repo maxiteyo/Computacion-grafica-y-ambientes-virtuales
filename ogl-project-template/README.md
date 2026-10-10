@@ -1,8 +1,8 @@
-# Práctico 01, 02, 03 y 04 — Intro a OpenGL, GLSL y la malla indexada
+# Práctico 01, 02, 03, 04 y 05 — Intro a OpenGL, GLSL, la malla indexada y la cámara
 
 **Materia:** Computación gráfica y ambientes virtuales (0494)  
 **Institución:** Centro Regional Universitario Córdoba — IUA  
-**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026)
+**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026; rev. Práctico 05: 18-sep-2026)
 
 ---
 
@@ -22,6 +22,10 @@ Proyecto introductorio a OpenGL moderno (4.6 core profile) y GLSL, organizado en
   S-211 en 7 piezas que reutilizan 5 mallas del P03, `RenderItem` como ítem de dibujo,
   y una escena única con cabeceo animado alrededor de la punta (el `main` no sabe cómo
   está armada la aeronave).
+- **Práctico 05:** cámara en la escena. Se elimina la "caja negra" (`uAjuste`) del vertex
+  shader y se reemplaza por matrices de vista y proyección REALES (`uView`/`uProjection`):
+  `CameraSystem` (órbita yaw/pitch/distancia + `perspective`) y `InputHandler` (mouse →
+  `CameraCommand`), con la escena del P04 y controles con el mouse.
 
 ## Requisitos
 
@@ -37,10 +41,10 @@ ogl-project-template/
 ├── assets/
 │   └── shaders/
 │       ├── triangle.vs / triangle.fs   # Práctico 01 (triángulo)
-│       └── cube.vs / cube.fs           # Prácticos 02-04 (uModel/uAjuste/uColor vec4)
+│       └── cube.vs / cube.fs           # Prácticos 02-05 (uModel/uView/uProjection/uColor)
 ├── src/
-│   ├── main.cpp                # Práctico 04: escena de la aeronave (sin glDelete*)
-│   ├── main_test.cpp           # Tests de ResourceManager + primitives (C++ puro)
+│   ├── main.cpp                # Práctico 05: escena de la aeronave + cámara orbital
+│   ├── main_test.cpp           # Tests de ResourceManager + primitives + cámara (C++ puro)
 │   └── core/
 │       ├── MeshData.h          # Vertex + MeshData (tupla y malla lado CPU)
 │       ├── ResourceManager.h/.cpp   # Lectura/cacheo de fuentes de shaders
@@ -48,7 +52,11 @@ ogl-project-template/
 │       ├── Mesh.h/.cpp              # VAO/VBO/EBO (RAII, ownership)
 │       ├── Primitives.h/.cpp        # Generador de mallas (cube/cylinder/cone/sphere)
 │       ├── RenderItem.h              # Ítem listo para dibujar (mesh + model + color)
-│       └── Aircraft.h/.cpp           # Aeronave S-211 (init/update/collect)
+│       ├── Aircraft.h/.cpp           # Aeronave S-211 (init/update/collect)
+│       ├── CameraData.h              # view + projection (estructura compartida)
+│       ├── CameraCommand.h           # deltas de órbita (yaw/pitch/distancia)
+│       ├── CameraSystem.h/.cpp       # Cámara orbital: estado + view + projection
+│       └── InputHandler.h/.cpp       # Mouse (posición + botones) -> CameraCommand
 ├── third_party/
 │   └── glad/                   # Loader de OpenGL (GLAD)
 ├── build/                      # Objetos compilados
@@ -59,6 +67,9 @@ ogl-project-template/
 
 El `Makefile` ya tiene `./src/core` en `LIB_DIRS`: los nuevos `.cpp` se recolectan solos,
 no hay que tocar la compilación al agregar módulos.
+
+Nota: el Makefile no rastrea dependencias de headers; al cambiar un `.h` conviene
+`touch` del `.cpp` asociado o `make clean` antes de recompilar.
 
 ## Compilación
 
@@ -71,7 +82,8 @@ make
 ### Tests (C++ puro, sin OpenGL)
 
 ```bash
-g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp src/core/ResourceManager.cpp src/main_test.cpp -o test_rm
+g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp src/core/ResourceManager.cpp \
+    src/core/CameraSystem.cpp src/core/InputHandler.cpp src/main_test.cpp -o test_rm
 ./test_rm
 ```
 
@@ -81,16 +93,120 @@ g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp src/core/ResourceManager.cp
 make run
 ```
 
-Abre una ventana de 800×600 que muestra una aeronave S-211 estilizada en vista
-tres cuartos (morro apuntando hacia arriba de la ventana, con una leve elevación de
-la cámara para ver el lomo, la deriva y las alas de frente)
-sobre fondo gris oscuro, con el cabeceo animado por reloj: `pitch = 0.45 · sin(t)`
-alrededor de la **punta de la nariz** (el punto de referencia de la aeronave).
-El avión tiene 7 piezas con un color distinto cada una: nariz (gris pizarra),
-fuselaje (plateado), ala derecha (azul), ala izquierda (verde), estabilizador
-horizontal derecho (naranja), izquierdo (amarillo) y deriva (rojo, la aleta que se
-ve parada en la cola). Presionar `Escape` la cierra. En consola se informa la
-inicialización de la aeronave.
+Abre una ventana de 800×600 que muestra la aeronave S-211 del Práctico 04 (7 piezas,
+7 colores, cabeceo `pitch = 0.45 · sin(t)` alrededor de la punta) pero vista por una
+**cámara orbital en PROYECCIÓN DE PERSPECTIVA**: la "caja negra" de los prácticos
+anteriores ya no existe, la cámara orbita el avión y el tamaño aparente depende de la
+distancia. Controles con el mouse:
+
+| Control | Acción |
+|---------|--------|
+| Arrastrar con botón **izquierdo** | Órbita: mover en X = acimut (yaw), en Y = elevación (pitch) |
+| Arrastrar con botón **derecho** | Zoom: mover en Y = acercar/alejar la cámara |
+| `Escape` | Cierra la ventana |
+
+El pitch de la órbita está acotado a ±0.9·π/2 (no se "tumba" la cámara) y la distancia a
+[2, 50] unidades (no atraviesa el avión ni lo pierde de vista). Al redimensionar la
+ventana, la proyección se recalcula con el nuevo aspect (el círculo sigue siendo
+círculo) y si se minimiza (alto 0) el aspect se se protege sin dividir por cero.
+
+## Práctico 05 — Los cambios
+
+### La cámara entra en la escena (adiós "caja negra")
+
+Hasta el P04 el vertex shader usaba `uAjuste * uModel`: un escalado fijo
+(`glm::scale(vec3(600.0f/800.0f, 1.0f, -1.0f))`) que corregía el aspect y daba vuelta
+`z`, con la cuarta fila de la matriz en `(0,0,0,1)`. Al NO haber división por `w`, un
+objeto que se aleja no se achica: no era una proyección real. En el P05:
+
+```glsl
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProjection;
+gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+```
+
+`uProjection` sale de `glm::perspective(fovy, aspect, near, far)` con `fovy = 45°`,
+`near = 0.5` (no "muy chico": precisión del z-buffer) y `far = 500`; `uView` sale de
+`glm::lookAt(eye, objetivo, up)` con la cámara de órbita. El orden `P · V · M` es el
+canónico (el modelo se aplica primero); invertirlo transforma los vértices en el orden
+equivocado y deforma la escena (el compilador no avisa: son matrices del mismo tipo).
+
+### `CameraData` y `CameraCommand` (estructuras compartidas, solo datos)
+
+- `CameraData { view, projection }` : el par de matrices del cuadro.
+- `CameraCommand { yaw_delta, pitch_delta, dist_delta }` : cambios de la órbita en
+  esféricas, ya interpretados. Signos: `(+)` en `dist_delta` se aleja.
+
+### `CameraSystem` (`CameraSystem.h/.cpp`)
+
+Administra el estado de la cámara y construye ambas matrices por cuadro. **No lee el
+mouse, no dibuja (cero OpenGL: testeable sin GPU) y no sabe cómo es la escena**: solo
+recibe el punto objetivo y el comando.
+
+- Estado: `yaw_` (longitud), `pitch_` (latitud), `distancia_` (radio). Con los deltas
+  del comando se actualiza, se acota y se pasa esféricas → cartesianas:
+  `eye = objetivo + d·(cosθ·cosψ, sinθ, cosθ·sinψ)`; `view = lookAt(eye, objetivo, up)`.
+- **Clamps** (preguntas de la consigna):
+  - `pitch ∈ ±0.9·π/2`: en ±π/2, `up` y la dirección de vista son colineales y el
+    producto vectorial interno de `lookAt` se anula → matriz indefinida (la imagen
+    "da un salto"). Con ±81° no se llega nunca a ese punto.
+  - `distancia ∈ [2, 50]`: el mínimo evita traspasar el objetivo (y el z-buffer), el
+    máximo evita perderlo de vista.
+- `set_viewport(width, height)`: recalcula la proyección para el aspect nuevo.
+  **Comprobación acá** (único consumidor del aspect): `width/height = max(1, valor)`,
+  así la ventana minimizada (alto 0) nunca divide por cero y al restaurarse se vuelve
+  al aspect correcto (el modelo no se deforma).
+- `update()` recibe `angulos_avion` y NO lo usa todavía (la órbita no depende de la
+  actitud). Servirá para una vista de **cabina** (Parte 3): ahí la orientación de la
+  cámara es la orientación del avión, dada en su propio referencial.
+
+### `InputHandler` (`InputHandler.h/.cpp`)
+
+Traduce el mouse a `CameraCommand` (polling una vez por cuadro, no eventos):
+
+```cpp
+double x, y;
+glfwGetCursorPos(window, &x, &y);          // POSICIÓN, no desplazamiento
+// delta = actual - anterior; se convierte a radianes con una ganancia (px -> rad)
+```
+
+- Botón **izquierdo** (órbita): `dx → yaw_delta`, `dy → pitch_delta` (ganancia
+  `0.005 rad/px`).
+- Botón **derecho** (zoom): `dy → dist_delta` (ganancia `0.02 unidades/px`). El mouse
+  es 2D y la órbita 3D: el tercer control entra con el segundo botón.
+- **Primer cuadro**: no hay posición anterior → `delta = 0` (`first_ = true`), así la
+  cámara no "salta" al empezar. Después `delta = actual - anterior` acumulado.
+
+### `main.cpp`
+
+- `CameraSystem camara(w, h)` e `InputHandler input` viven FUERA del bloque de objetos
+  de GPU (son CPU puro) y `glfwSetWindowUserPointer(window, &camara)` guarda el puntero.
+- El callback de GLFW es una **función, no un método**: `framebuffer_size_callback`
+  recupera la cámara con `glfwGetWindowUserPointer` y llama en orden
+  `glViewport(...)` (rectángulo de píxeles) y `camara.set_viewport(...)` (recalcular
+  la proyección): son dos cosas distintas y hacen falta las dos.
+- En el bucle: posición + botones → `input.poll(...)` → `camara.update(posicion,
+  angulos, cmd)` → `shader.set_uniform(locView/locProjection, ...)` → ítems.
+- `posicion = (-0.5, 0, 0)`: el avión (largo 1, punta en su origen) queda con su
+  CENTRO en el origen del mundo, que es el objetivo de la órbita.
+- **`Aircraft` sin base**: la antigua `base` compensaba la proyección 2D; con cámara
+  real el avión se dibuja en su referencial natural (morro −X, +Y ala derecha, +Z
+  arriba) y el ángulo de vista lo elige la cámara al orbitar.
+
+### Verificación
+
+- **Perspectiva**: con capturas PPM a distancia 10 y 30 (misma órbita) el avión mide
+  `78×62` px y `25×21` px: se achica ~3× (10→30). Antes no pasaba (no había `w`).
+- **Órbita sin deformación**: al arrastrar el mouse la escena queda quieta y solo se
+  mueve el punto de vista; el modelo no cambia de tamaño ni se deforma.
+- **Resize sin deformación**: redimensionar la esquina recalcula `perspective` con el
+  aspect nuevo (`glViewport` + `set_viewport`).
+- **Pitch acotado**: llevar el pitch hasta el tope no da saltos ni pantalla negra
+  (clamp de `lookAt`).
+- Tests (15): proyección con aspect y división por `w`, view centrando el objetivo con
+  clamps de pitch/distancia (sin NaN), alto 0 en `set_viewport`, e `InputHandler`
+  (primer cuadro, signos y ganancias).
 
 ## Práctico 04 — Los cambios
 

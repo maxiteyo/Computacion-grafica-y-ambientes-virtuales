@@ -1,9 +1,11 @@
 // ============================================================================
-// main_test.cpp — Tests de ResourceManager y primitives (C++ puro, sin OpenGL).
+// main_test.cpp — Tests de ResourceManager, primitives, CameraSystem e
+//                 InputHandler (C++ puro, sin OpenGL).
 //
 // Compilación (desde la raíz del proyecto):
 //   g++ -std=c++17 -Wall -Wextra src/core/Primitives.cpp
-//       src/core/ResourceManager.cpp src/main_test.cpp -o test_rm
+//       src/core/ResourceManager.cpp src/core/CameraSystem.cpp
+//       src/core/InputHandler.cpp src/main_test.cpp -o test_rm
 //
 // Ejecución (desde la raíz del proyecto):
 //   ./test_rm
@@ -14,17 +16,27 @@
 // LOS TRIÁNGULOS con el producto vectorial (B-A)x(C-A): el resultado debe
 // apuntar en la misma dirección que la normal del primer vértice del triángulo
 // (CCW visto desde afuera; el culling está deshabilitado y no lo detecta).
+//
+// Práctico 05: CameraSystem no toca OpenGL ni el mouse (recibe CameraCommand),
+// así que la proyección (perspectiva con división por w, aspect del viewport),
+// la vista orbital (objetivo centrado, clamps de pitch/distancia) y
+// InputHandler (primer cuadro sin salto, signos y ganancias px->rad) se
+// testean sin GPU ni ventana.
 // ============================================================================
 
 #include <iostream>
 #include <cassert>
 #include <cmath>
 
-#include <glm/glm.hpp>  // glm::cross, glm::dot, glm::normalize, glm::length
+#include <glm/glm.hpp>                     // glm::cross, dot, normalize, length
+#include <glm/gtc/matrix_transform.hpp>    // glm::radians (tests de cámara)
 
 #include "core/ResourceManager.h"
 #include "core/Primitives.h"
 #include "core/MeshData.h"
+#include "core/CameraCommand.h"
+#include "core/CameraSystem.h"
+#include "core/InputHandler.h"
 
 namespace {
 
@@ -375,6 +387,124 @@ int main()
 
 	assert(all_winding_ok(sph) && "Todos los triángulos de la esfera en CCW");
 	std::cout << "  OK: winding CCW verificado por producto vectorial." << std::endl;
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 13: CameraSystem::set_viewport() arma la proyección de
+	//          PERSPECTIVA (división por w) con el aspect correcto.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 13] CameraSystem::set_viewport() (perspectiva)..." << std::endl;
+	CameraSystem cam(800, 600);  // aspect = 4/3
+	const float inv_tan = 1.0f / std::tan(glm::radians(22.5f));
+	{
+		const glm::mat4& proj = cam.data().projection;
+
+		// glm::perspective(45°): [1][1] = 1/tan(θv/2), [0][0] = [1][1]/aspect.
+		assert(std::abs(proj[1][1] - inv_tan) < 1e-4f
+		       && "proj[1][1] = 1/tan(fovy/2)");
+		assert(std::abs(proj[0][0] - inv_tan / (800.0f / 600.0f)) < 1e-4f
+		       && "proj[0][0] = proj[1][1] / aspect");
+		// La "caja negra" tenía cuarta fila (0,0,0,1): la perspectiva NO.
+		assert(std::abs(proj[2][3] + 1.0f) < 1e-6f
+		       && "proj[2][3] = -1: hay división por w");
+		assert(std::abs(proj[3][3]) < 1e-6f
+		       && "proj[3][3] = 0: la cuarta fila ya no es (0,0,0,1)");
+		std::cout << "  OK: perspectiva con aspect 4/3 y división por w." << std::endl;
+	}
+	// Al minimizar la ventana el alto llega a 0: set_viewport() lo corrige y
+	// la proyección nunca queda con aspect indefinido (ni NaN ni inf).
+	cam.set_viewport(800, 0);
+	{
+		const glm::mat4& proj = cam.data().projection;
+		bool finito = true;
+		for (int c = 0; c < 4 && finito; ++c)
+			for (int f = 0; f < 4; ++f)
+				finito = finito && !std::isnan(proj[c][f])
+				              && !std::isinf(proj[c][f]);
+		assert(finito && "proyección finita con la ventana minimizada (h=0)");
+		std::cout << "  OK: proyección finita con alto 0 (minimizada)." << std::endl;
+	}
+	cam.set_viewport(800, 600);
+	assert(std::abs(cam.data().projection[0][0]
+	                - inv_tan / (800.0f / 600.0f)) < 1e-4f
+	       && "Al restaurar el tamaño se restaura el aspect");
+	std::cout << "  OK: se restaura el aspect al volver a 800x600." << std::endl;
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 14: CameraSystem::update() -> la vista SIEMPRE apunta al
+	//          objetivo (el objetivo queda en (0,0,-d) de view space).
+	// ---------------------------------------------------------------
+	std::cout << "[Test 14] CameraSystem::update() (vista orbital)..." << std::endl;
+	{
+		const glm::vec3 objetivo(0.0f);
+		CameraCommand cmd0;                        // deltas cero
+		cam.update(objetivo, glm::vec3(0.0f), cmd0);
+		glm::vec4 centered = cam.data().view * glm::vec4(objetivo, 1.0f);
+		assert(std::abs(centered.x) < 1e-4f && std::abs(centered.y) < 1e-4f
+		       && "El objetivo queda centrado en el view space");
+		assert(std::abs(centered.z - (-10.0f)) < 1e-3f
+		       && "El objetivo está a distancia_ = 10 delante de la cámara");
+
+		// Comando extremo: la vista no se indefine (clamps de pitch y distancia).
+		CameraCommand big;
+		big.yaw_delta   = 5.0f;
+		big.pitch_delta = 50.0f;   // muy por encima del límite ±0.9·π/2
+		big.dist_delta  = -100.0f; // muy por debajo del mínimo
+		cam.update(objetivo, glm::vec3(0.0f), big);
+		const glm::mat4& view = cam.data().view;
+		bool finito = true;
+		for (int c = 0; c < 4 && finito; ++c)
+			for (int f = 0; f < 4; ++f)
+				finito = finito && !std::isnan(view[c][f])
+				              && !std::isinf(view[c][f]);
+		assert(finito && "El clamp de pitch (±0.9·π/2) evita el lookAt singular");
+
+		centered = cam.data().view * glm::vec4(objetivo, 1.0f);
+		assert(std::abs(centered.x) < 1e-4f && std::abs(centered.y) < 1e-4f
+		       && "Con el comando extremo el objetivo sigue centrado");
+		assert(std::abs(centered.z + 2.0f) < 1e-3f
+		       && "La distancia se encoge al mínimo (2.0), no atraviesa el objetivo");
+		std::cout << "  OK: vista apuntando al objetivo con clamps (pitch y dist)."
+		          << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 15: InputHandler: primer cuadro sin salto, signos y ganancias.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 15] InputHandler::poll() (mouse -> CameraCommand)..." << std::endl;
+	{
+		InputHandler input;
+		CameraCommand cmd;
+
+		// Primer cuadro: no hay posición anterior -> comando vacío (sin salto).
+		input.poll(100.0, 200.0, true, false, cmd);
+		assert(cmd.yaw_delta == 0.0f && cmd.pitch_delta == 0.0f
+		       && cmd.dist_delta == 0.0f
+		       && "Primer cuadro: delta = 0");
+
+		// Segundo cuadro, botón izquierdo: +100 px en X y -40 px en Y.
+		input.poll(200.0, 160.0, true, false, cmd);
+		assert(std::abs(cmd.yaw_delta - (-100.0f * InputHandler::kOrbitGain)) < 1e-6f
+		       && "dx = +100 px -> yaw_delta = -dx * kOrbitGain");
+		assert(std::abs(cmd.pitch_delta - (-(-40.0f) * InputHandler::kOrbitGain)) < 1e-6f
+		       && "dy = -40 px -> pitch_delta = -dy * kOrbitGain (elevar)");
+		assert(cmd.dist_delta == 0.0f && "Sin botón derecho no hay zoom");
+
+		// Botón derecho: +20 px en Y -> se acerca (dist_delta negativo).
+		input.poll(200.0, 180.0, false, true, cmd);
+		assert(std::abs(cmd.dist_delta - (-20.0f * InputHandler::kZoomGain)) < 1e-6f
+		       && "dy = +20 px -> dist_delta = -dy * kZoomGain (acerca)");
+		assert(cmd.yaw_delta == 0.0f && cmd.pitch_delta == 0.0f
+		       && "Sin botón izquierdo no hay órbita");
+
+		// Sin botones: comando vacío (pasar el mouse no mueve la cámara).
+		input.poll(300.0, 180.0, false, false, cmd);
+		assert(cmd.yaw_delta == 0.0f && cmd.pitch_delta == 0.0f
+		       && cmd.dist_delta == 0.0f && "Sin botones: nada se mueve");
+		std::cout << "  OK: primer cuadro, signos, ganancias y botones." << std::endl;
+	}
 	std::cout << std::endl;
 
 	std::cout << "=== Todos los tests pasaron ===" << std::endl;

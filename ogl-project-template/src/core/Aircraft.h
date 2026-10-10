@@ -23,15 +23,15 @@
 //   - angulos de update() = (roll, pitch, yaw) = rotaciones sobre X, Y y Z
 //     respectivamente. El cabeceo es la rotacion sobre el eje Y (eje paralelo
 //     al ala), que pasa por el punto de referencia en el origen.
-//   - pose_ = T(pos) · base · R(angulos) · T(−ref), con ref = (0,0,0) la punta,
+//   - pose_ = T(pos) · R(angulos) · T(−ref), con ref = (0,0,0) la punta,
 //     así que la rotación deja clavado el morro y balancea la cola (T(−ref) queda
 //     identidad, pero se mantiene explícito por la forma general).
-//   - base es una ORIENTACIÓN FIJA de puesta en escena (update()): el mundo de la
-//     "caja negra" se mira en planta (plano XY desde +Z), así que sin base el
-//     avión quedaría con las alas verticales en pantalla (el +Y del avión iría
-//     al "arriba" de pantalla). base = Rz(-90°) rota el modelo 90° en planta:
-//     el morro apunta "arriba" de la ventana y las alas quedan horizontales,
-//     como un plan view clásico (volando recto, +Y del avión a la derecha).
+//   - Práctico 05: ya NO hay base de puesta en escena. La antigua base giraba el
+//     modelo para compensar la proyección 2D ("caja negra" uAjuste) y dejarlo en
+//     planta. Ahora la escena tiene una cámara orbital con perspectiva real
+//     (CameraSystem): el avión se dibuja en su referencial NATURAL (morro hacia
+//     −X, +Y ala derecha, +Z arriba) y el ángulo de vista lo elige la cámara al
+//     orbitar alrededor de su posición.
 //
 // Piezas y mallas:
 //   - 7 piezas (nariz, fuselaje, 2 alas, 2 estabilizadores horizontales,
