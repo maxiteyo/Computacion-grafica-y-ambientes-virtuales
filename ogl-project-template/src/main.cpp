@@ -1,5 +1,18 @@
 // ============================================================================
-// main.cpp — Práctico 06: game loop, input y FDM
+// main.cpp — Práctico 07: terreno procedural (malla N×N + culling + ventana)
+//
+// Sobre la escena del Práctico 06 (aeronave volada por el FDM en metros, cámara
+// orbital y game loop de paso fijo) se agrega un TERRENO procedural:
+//   - La malla N×N se genera por programa desde una función altura (ruido
+//     FastNoiseLite) — la malla y las alturas están DESACOPLADAS (Terrain.h).
+//   - Se calculan las NORMALES (diferencias centradas; todavía sin iluminación)
+//     y se trabaja en METROS.
+//   - Se habilita el back-face culling (glEnable(GL_CULL_FACE)); la topología
+//     del terreno está ordenada CCW vista desde arriba (se corrigió el winding
+//     en el generador, NO con glFrontFace): desde abajo no se ve nada.
+//   - El terreno es ILIMITADO: una VENTANA (TerrainWindow) se desliza por el
+//     heightmap siguiendo al avión, moviéndose a saltos de una celda (sin
+//     "reptar") y repartiendo el recálculo entre cuadros (sin tirones).
 //
 // La escena sigue siendo la aeronave del Práctico 04 (Aircraft + RenderItem)
 // con la cámara orbital del Práctico 05, pero ahora la aeronave se mueve según
@@ -31,7 +44,7 @@
 //   Mouse: botón IZQUIERDO orbita, botón DERECHO hace zoom (Práctico 05).
 //   Flechas: palanca (↑↓ elevador: ↑ nariz abajo / ↓ nariz arriba; ←→
 //   alerones); Q/E: pedales (timón); W/S: potencia. P: pausa (evento);
-//   L: wireframe (evento); ESC: salir.
+//   L: wireframe (evento); V: vista de terreno (evento); ESC: salir.
 //
 // El ejecutable de prueba standalone del FDM vive en libs/dlfdm (make + ./build/
 // dlfdm-test): 60 s de simulación off-line para verificar el módulo aislado.
@@ -69,8 +82,11 @@
 #include "core/CameraSystem.h"
 #include "core/InputHandler.h"
 #include "core/FlightData.h"
+#include "core/Terrain.h"
+#include "core/NoiseHeights.h"
+#include "core/TerrainWindow.h"
 
-static const char* kWindowTitle     = "OpenGL - Practico 06: game loop, input y FDM";
+static const char* kWindowTitle     = "OpenGL - Practico 07: terreno procedural";
 static constexpr int kWindowWidth   = 800;
 static constexpr int kWindowHeight  = 600;
 static constexpr int kGLVerMajor    = 4;
@@ -85,6 +101,36 @@ static constexpr double kMaxFrameDt = 0.25;
 // Escala visual del modelo (mide 1) para el mundo en metros: el S-211 real
 // mide ~9.6 m de largo -> legible a la distancia de cámara de seguimiento.
 static constexpr float kAircraftScale = 9.6f;
+
+// ---- Práctico 07: parámetros del terreno procedural ------------------------
+// Malla: N×N CELDAS -> (N+1)×(N+1) vértices. Con N=1000 y paso de 30 m la
+// ventana mide 30x30 km (radio 15 km): suficiente para que TODO lo visible
+// (far = 10 km + el corrimiento de la cámara) caiga dentro de la malla y nunca
+// se vea el borde.
+static constexpr unsigned kTerrainCells    = 1000;
+static constexpr float    kTerrainSpacing  = 30.0f;   // separación entre nodos [m]
+// Fuente de alturas: ruido determinista (misma semilla -> mismo terreno). La
+// frecuencia (ciclos por nodo) fija el tamaño de las lomas: 0.01 -> ~100 celdas
+// (~3 km). La amplitud nominal es 800 m (tope de |h|); una ventana no llega al
+// extremo: el rango medido fue ~[-600, 520] m.
+static constexpr int      kTerrainSeed     = 1337;
+static constexpr float    kTerrainFreq     = 0.01f;
+static constexpr float    kTerrainAmplitud = 800.0f;
+// Elevación base del terreno [m]. El avión arranca en el trim de 5000 m y el
+// relieve es de ~±500 m, así que sin base el suelo quedaría ~4.5 km abajo. Con
+// base = 4200 m el terreno queda a ~800 m (y las cumbres a ~300 m) del avión: se
+// ve cerca sin tocar el FDM (el trim sigue siendo exacto). No cambia el relieve
+// ni las normales: es solo un desplazamiento vertical del mundo.
+static constexpr float    kTerrainBase     = 4200.0f;
+static const glm::vec4    kTerrainColor    = glm::vec4(0.33f, 0.45f, 0.25f, 1.0f);
+
+// Presets de órbita: vista de "chase" (el avión) y vista de TERRENO (el origen,
+// desde arriba). Al alternar con V se salta a una pose útil sin tener que orbitar
+// a mano y sin que las dos vistas "peleen" por el mismo estado de cámara.
+static constexpr float    kChaseDist   = 60.0f;
+static constexpr float    kChasePitch  = 25.0f;   // grados sobre el horizonte
+static constexpr float    kTerrainDist = 2000.0f;
+static constexpr float    kTerrainPitch = 40.0f;  // grados mirando hacia abajo
 
 static int glfw_error_code{};
 static std::string glfw_error_str{};
@@ -184,6 +230,32 @@ int main()
                   << kAircraftScale << ")." << std::endl;
 
         // ----------------------------------------------------------------
+        // ETAPA 1.5: TERRENO procedural (Práctico 07). NoiseHeights es la
+        //            FUENTE DE ALTURAS (ruido, determinista) y TerrainWindow
+        //            posee la malla de (N+1)² nodos que se desliza. Se arranca
+        //            centrada bajo la posición inicial del avión. La elevación
+        //            base (kTerrainBase) coloca el mundo a la altura del vuelo.
+        // ----------------------------------------------------------------
+        terrain::NoiseHeights alturas(kTerrainSeed, kTerrainFreq, kTerrainAmplitud,
+                                      5, kTerrainBase);
+        const glm::vec3 pos0 = fp::to_world(fdm.getState()).position;
+        TerrainWindow terreno;
+        terreno.init(kTerrainCells, kTerrainSpacing, alturas, pos0.x, pos0.z);
+        const terrain::Stats& ts = terreno.stats();
+        std::cout << "Terreno: " << (kTerrainCells + 1) << "x"
+                  << (kTerrainCells + 1) << " nodos, paso " << kTerrainSpacing
+                  << " m (ventana "
+                  << (kTerrainCells * kTerrainSpacing / 1000.0f) << "x"
+                  << (kTerrainCells * kTerrainSpacing / 1000.0f)
+                  << " km), alturas [" << ts.min_h << ", " << ts.max_h
+                  << "] m." << std::endl;
+
+        // Altura del terreno en el ORIGEN del mundo: es el objetivo de la vista
+        // de terreno (tecla V). Como el mundo está elevado con kTerrainBase, la
+        // cámara NO puede apuntar a y = 0 (quedaría debajo de la superficie).
+        const float origen_y = alturas(0, 0);
+
+        // ----------------------------------------------------------------
         // ETAPA 2: armar el programa de shaders y consultar sus uniforms
         // ----------------------------------------------------------------
         ResourceManager rm(".");
@@ -211,6 +283,14 @@ int main()
         // cada pieza) se oculten entre sí de forma coherente.
         glEnable(GL_DEPTH_TEST);
 
+        // Práctico 07: ELIMINACIÓN DE SUPERFICIES OCULTAS (back-face culling).
+        // Con glCullFace(GL_BACK) + glFrontFace(GL_CCW) por defecto, se descartan
+        // los triángulos vistos por su cara de atrás. La topología del terreno
+        // está ordenada CCW vista desde arriba, así que mirando desde abajo no se
+        // dibuja nada (se "ve" el fondo). NO se toca glFrontFace: se corrigió el
+        // winding en el generador de malla (build_grid).
+        glEnable(GL_CULL_FACE);
+
         // ----------------------------------------------------------------
         // ETAPA 3: bucle de renderizado (paso fijo con acumulador, Parte 1)
         // ----------------------------------------------------------------
@@ -227,6 +307,7 @@ int main()
         // para detectar el borde y alternar UNA vez por pulsación (consigna).
         bool pause_on = false;   bool p_prev = false;
         bool wire_on  = false;   bool l_prev = false;
+        bool terreno_view = false;  bool v_prev = false;
 
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
@@ -255,6 +336,27 @@ int main()
                           << std::endl;
             }
             l_prev = l_cur;
+
+            // ---- Evento (V): vista de TERRENO. Reapunta la cámara al ORIGEN del
+            //      mundo (en vez de al avión) para inspeccionar el relieve desde
+            //      arriba, desde abajo (con culling no se ve nada) y el borde de
+            //      la ventana. La ventana de terreno sigue a la cámara objetivo.
+            const bool v_cur = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+            if (v_cur && !v_prev) {
+                terreno_view = !terreno_view;
+                if (terreno_view) {
+                    camara.set_orbit(glm::radians(90.0f),
+                                     glm::radians(kTerrainPitch), kTerrainDist);
+                    std::cout << "[V] vista de TERRENO (objetivo = origen, "
+                                 "mirando hacia abajo)." << std::endl;
+                } else {
+                    camara.set_orbit(glm::radians(90.0f),
+                                     glm::radians(kChasePitch), kChaseDist);
+                    std::cout << "[V] vista de CHASE (objetivo = avión)."
+                              << std::endl;
+                }
+            }
+            v_prev = v_cur;
 
             if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
                 glfwSetWindowShouldClose(window, true);
@@ -291,9 +393,28 @@ int main()
             // Borrar también el buffer de profundidad en cada frame.
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            camara.update(vuelo.position, angulos, input.camera_cmd());
+            // ---- Práctico 07: objetivo de la cámara y VENTANA de terreno ----
+            // En la vista de chase el objetivo es el avión; con V (vista de
+            // terreno) se reapunta al ORIGEN del mundo (a la altura del terreno,
+            // no a y=0: el mundo está elevado con kTerrainBase). La ventana de
+            // terreno se centra sobre ESE objetivo y se recentra de a poco si
+            // hace falta (update() reparte el trabajo y solo cuando termina
+            // cambia el origen).
+            const glm::vec3 objetivo = terreno_view
+                                           ? glm::vec3(0.0f, origen_y, 0.0f)
+                                           : vuelo.position;
+            if (terreno.update(objetivo.x, objetivo.z)) {
+                std::cout << "[terreno] ventana recentrada a ("
+                          << terreno.origin_x() << ", " << terreno.origin_z()
+                          << ") nodos." << std::endl;
+            }
+
+            camara.update(objetivo, angulos, input.camera_cmd());
             avion.update(vuelo.position, angulos);
             avion.collect(items);
+            // El terreno entra como una pieza más: mesh + su modelo->mundo
+            // (traslación del origen de la ventana) + color plano.
+            items.push_back({terreno.mesh(), terreno.model(), kTerrainColor});
 
             shader.use();
             shader.set_uniform(locView, camara.data().view);
@@ -322,7 +443,7 @@ int main()
             //    for (std::size_t i = 0, j = 0; i < buf.size(); i += 4, j += 3) {
             //        rgb[j] = buf[i]; rgb[j + 1] = buf[i + 1]; rgb[j + 2] = buf[i + 2];
             //    }
-            //    std::ofstream out("/tmp/opencode/tp6.ppm", std::ios::binary);
+            //    std::ofstream out("/tmp/opencode/frame.ppm", std::ios::binary);
             //    out << "P6\n" << kWindowWidth << " " << kWindowHeight << "\n255\n";
             //    out.write(reinterpret_cast<const char*>(rgb.data()),
             //              static_cast<std::streamsize>(rgb.size()));

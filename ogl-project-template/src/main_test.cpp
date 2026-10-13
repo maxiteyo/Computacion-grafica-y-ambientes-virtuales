@@ -41,6 +41,7 @@
 
 #include <iostream>
 #include <cassert>
+#include <algorithm>   // std::min, std::max
 #include <cmath>
 
 #include <glm/glm.hpp>                     // glm::cross, dot, normalize, length
@@ -57,6 +58,8 @@
 #include "core/CameraSystem.h"
 #include "core/InputHandler.h"
 #include "core/FlightData.h"
+#include "core/Terrain.h"
+#include "core/NoiseHeights.h"
 
 namespace {
 
@@ -92,6 +95,29 @@ int count_near(const MeshData& m, const glm::vec3& p, float eps)
 	}
 	return n;
 }
+
+// --- Fuentes de altura sintéticas para el terreno (Práctico 07) ---------------
+// Altura constante 0: normales exactas (0,1,0) y winding verificable.
+struct FlatHeights : terrain::HeightField {
+	float operator()(int, int) const override { return 0.0f; }
+};
+
+// Altura lineal h = a·nx + b·nz -> plano y = (a/paso)·x + (b/paso)·z, cuya
+// normal hacia arriba es normalizar((-a, paso, -b)).
+struct RampHeights : terrain::HeightField {
+	float a = 1.0f, b = 1.0f;
+	float operator()(int nx, int nz) const override {
+		return a * static_cast<float>(nx) + b * static_cast<float>(nz);
+	}
+};
+
+// Altura determinista con dependencia cruzada: para el test de continuidad.
+struct CrossHeights : terrain::HeightField {
+	float operator()(int nx, int nz) const override {
+		return 3.0f * static_cast<float>(nx) - 5.0f * static_cast<float>(nz)
+		     + 0.25f * static_cast<float>(nx * nz);
+	}
+};
 
 }  // namespace
 
@@ -458,7 +484,7 @@ int main()
 	std::cout << "[Test 14] CameraSystem::update() (vista orbital)..." << std::endl;
 	{
 		// Escala del mundo en METROS (Práctico 06): distancia inicial 60 m de
-		// seguimiento y clamps [30, 3000] (ver CameraSystem.h).
+		// seguimiento y clamps [30, 2000] (Práctico 07, ver CameraSystem.h).
 		const glm::vec3 objetivo(0.0f);
 		CameraCommand cmd0;                        // deltas cero
 		cam.update(objetivo, glm::vec3(0.0f), cmd0);
@@ -493,8 +519,8 @@ int main()
 		far.dist_delta = 100000.0f;
 		cam.update(objetivo, glm::vec3(0.0f), far);
 		centered = cam.data().view * glm::vec4(objetivo, 1.0f);
-		assert(std::abs(centered.z + 3000.0f) < 1e-3f
-		       && "La distancia se estira al máximo (3000 m)");
+		assert(std::abs(centered.z + 2000.0f) < 1e-3f
+		       && "La distancia se estira al máximo (2000 m)");
 		std::cout << "  OK: vista apuntando al objetivo con clamps (pitch y dist)."
 		          << std::endl;
 	}
@@ -772,6 +798,186 @@ int main()
 
 		std::cout << "  OK: rampas, topes, potencia, resorte al trim y "
 		             "set_controls()." << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 19: build_grid (terreno, Práctico 07): conteos de la malla N×N,
+	//          winding CCW hacia +Y, alturas/posiciones y tex_coords. Con
+	//          altura constante 0 las normales son exactas (0,1,0).
+	// ---------------------------------------------------------------
+	std::cout << "[Test 19] Terreno: build_grid (conteos, winding, alturas)..."
+	          << std::endl;
+	{
+		const unsigned N = 4;
+		const float paso = 2.0f;
+		FlatHeights plano;
+		const MeshData m = terrain::build_grid(N, paso, 0, 0, plano);
+
+		// (N+1)² vértices y 6·N² índices (dos triángulos por celda).
+		assert(m.vertices.size() == std::size_t(N + 1) * (N + 1)
+		       && "Vértices: (N+1)²");
+		assert(m.indices.size() == std::size_t(6) * N * N
+		       && "Índices: 6·N²");
+
+		for (const auto& v : m.vertices) {
+			assert(std::abs(v.position.y) < 1e-6f && "Altura plana: y = 0");
+			assert(std::abs(v.normal.y - 1.0f) < 1e-6f
+			       && "Plano -> normal (0,1,0)");
+		}
+
+		// Winding: en TODOS los triángulos (B−A)×(C−A) apunta a +Y (arriba).
+		for (std::size_t k = 0; k + 2 < m.indices.size(); k += 3) {
+			const glm::vec3 A = m.vertices[m.indices[k]].position;
+			const glm::vec3 B = m.vertices[m.indices[k + 1]].position;
+			const glm::vec3 C = m.vertices[m.indices[k + 2]].position;
+			assert(glm::cross(B - A, C - A).y > 0.0f
+			       && "Winding CCW visto desde arriba");
+		}
+
+		// Posiciones LOCALES x = j·paso, z = i·paso; idx(i,j) = i·(N+1)+j.
+		const unsigned fila = N + 1;
+		assert(std::abs(m.vertices[0].position.x) < 1e-6f
+		       && std::abs(m.vertices[0].position.z) < 1e-6f);
+		assert(std::abs(m.vertices[N].position.x - float(N) * paso) < 1e-6f
+		       && std::abs(m.vertices[N].position.z) < 1e-6f
+		       && "Vértice (i=0, j=N): x = N·paso");
+		assert(std::abs(m.vertices[N * fila].position.z - float(N) * paso) < 1e-6f
+		       && "Vértice (i=N, j=0): z = N·paso");
+
+		// tex_coords: esquina (0,0) -> (0,0); última (N,N) -> (1,1).
+		assert(glm::length(m.vertices[0].tex_coords) < 1e-6f);
+		assert(glm::length(m.vertices.back().tex_coords - glm::vec2(1.0f)) < 1e-6f
+		       && "tex_coords normalizadas a [0,1]");
+		std::cout << "  OK: (N+1)² vértices, 6·N² índices y winding hacia +Y."
+		          << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 20: normal por diferencias centradas (altura lineal) y Stats.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 20] Terreno: normal analítica y Stats..." << std::endl;
+	{
+		const unsigned N = 6;
+		const float paso = 2.0f;
+		RampHeights rampa;
+		rampa.a = 1.5f;
+		rampa.b = -0.75f;
+
+		terrain::Stats st;
+		const MeshData m = terrain::build_grid(N, paso, 0, 0, rampa, &st);
+
+		// En el INTERIOR (sin clamp de borde) la normal es constante y coincide
+		// con la analítica; en el borde la diferencia es a un lado (se prueba en
+		// el Test 22 que igual queda unitaria y hacia arriba).
+		const glm::vec3 esperada =
+		    glm::normalize(glm::vec3(-rampa.a, paso, -rampa.b));
+		const unsigned fila = N + 1;
+		for (unsigned i = 1; i < N; ++i) {
+			for (unsigned j = 1; j < N; ++j) {
+				const Vertex& v = m.vertices[i * fila + j];
+				assert(glm::length(v.normal - esperada) < 1e-5f
+				       && "Normal de un plano inclinado (centrada)");
+			}
+		}
+
+		// h = 1.5·nx − 0.75·nz sobre nx,nz ∈ [0,6]: mín = −4.5, máx = 9.
+		assert(std::abs(st.min_h - (0.0f - 0.75f * float(N))) < 1e-4f
+		       && "Stats: mín en (0,N)");
+		assert(std::abs(st.max_h - (1.5f * float(N) - 0.0f)) < 1e-4f
+		       && "Stats: máx en (N,0)");
+		std::cout << "  OK: normal centrada = analítica; Stats mín/máx correctos."
+		          << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 21: window_origin (encaje en la grilla de nodos: sin "reptar") y
+	//          NoiseHeights (determinista, acotada y con relieve).
+	// ---------------------------------------------------------------
+	std::cout << "[Test 21] Terreno: window_origin y NoiseHeights..."
+	          << std::endl;
+	{
+		// ox = round(x/paso) − N/2: dentro de la celda la ventana NO se mueve.
+		assert(terrain::window_origin(0.0f, 25.0f, 800) == -400);
+		assert(terrain::window_origin(11.0f, 25.0f, 800) == -400
+		       && "Dentro de la celda: no se mueve (sin reptar)");
+		assert(terrain::window_origin(13.0f, 25.0f, 800) == -399
+		       && "Cruzada la celda: salta 1 nodo");
+		assert(terrain::window_origin(-13.0f, 25.0f, 800) == -401
+		       && "Simétrico hacia el otro lado");
+		assert(terrain::window_origin(0.0f, 10.0f, 4) == -2
+		       && "Centrado: round(0) − N/2");
+
+		terrain::NoiseHeights a(1337, 0.01f, 800.0f);
+		terrain::NoiseHeights b(1337, 0.01f, 800.0f);
+		terrain::NoiseHeights c(99, 0.01f, 800.0f);
+		assert(a(3, 7) == b(3, 7) && "Misma semilla -> mismas alturas");
+		assert(a(3, 7) != c(3, 7) && "Otra semilla -> otro terreno");
+
+		float mn = 1e9f, mx = -1e9f;
+		for (int i = 0; i < 200; ++i) {
+			for (int j = 0; j < 200; ++j) {
+				const float y = a(i * 7, j * 7);
+				mn = std::min(mn, y);
+				mx = std::max(mx, y);
+			}
+		}
+		assert(mn >= -800.001f && mx <= 800.001f
+		       && "La altura respeta la amplitud nominal");
+		assert(mx - mn > 100.0f && "El ruido produce relieve (no es plano)");
+
+		// La ELEVACIÓN BASE (Práctico 07) desplaza el terreno SIN tocar el
+		// relieve: y = base + ruido, así que cada altura sube exactamente la base
+		// y el rango (mx − mn) queda igual. Se usa para acercar el mundo al avión
+		// (que vuela en el trim de 5000 m) sin tocar el FDM.
+		terrain::NoiseHeights con_base(1337, 0.01f, 800.0f, 5, 4200.0f);
+		assert(std::abs(con_base(3, 7) - (a(3, 7) + 4200.0f)) < 1e-3f
+		       && "La base desplaza la altura exactamente (y = base + ruido)");
+		std::cout << "  OK: la elevación base desplaza el terreno sin cambiar "
+		             "el relieve." << std::endl;
+		std::cout << "  OK: window_origin encaja en la grilla; ruido determinista "
+		             "y acotado." << std::endl;
+	}
+	std::cout << std::endl;
+
+	// ---------------------------------------------------------------
+	// Test 22: CONTINUIDAD de la ventana deslizante: un mismo nodo del mundo
+	//          da la misma altura (y la misma posición MUNDIAL) en dos
+	//          ventanas corridas UNA celda; las normales de borde existen.
+	// ---------------------------------------------------------------
+	std::cout << "[Test 22] Terreno: continuidad entre ventanas vecinas..."
+	          << std::endl;
+	{
+		const unsigned N = 3;
+		const float paso = 5.0f;
+		CrossHeights f;
+		const MeshData a = terrain::build_grid(N, paso, 0, 0, f);
+		const MeshData b = terrain::build_grid(N, paso, 1, 0, f);
+		const unsigned fila = N + 1;
+
+		for (unsigned i = 0; i < fila; ++i) {
+			for (unsigned j = 0; j < fila - 1; ++j) {
+				// Nodo del mundo (nx=1+j, nz=i): en `a` es la columna j+1
+				// (ox=0) y en `b` la columna j (ox=1).
+				const Vertex& va = a.vertices[i * fila + (j + 1)];
+				const Vertex& vb = b.vertices[i * fila + j];
+				assert(std::abs(va.position.y - vb.position.y) < 1e-4f
+				       && "El mismo nodo del mundo tiene la misma altura");
+				assert(std::abs(va.position.x - (vb.position.x + paso)) < 1e-4f
+				       && "El mismo nodo cae en la misma x del mundo");
+			}
+		}
+
+		// Normales de borde (y de todo el campo): unitarias y hacia arriba.
+		for (const auto& v : a.vertices) {
+			assert(std::abs(glm::length(v.normal) - 1.0f) < 1e-5f
+			       && "Normal unitaria incluso en el borde");
+			assert(v.normal.y > 0.0f && "Normal siempre hacia arriba");
+		}
+		std::cout << "  OK: alturas continuas entre ventanas; normales unitarias."
+		          << std::endl;
 	}
 	std::cout << std::endl;
 

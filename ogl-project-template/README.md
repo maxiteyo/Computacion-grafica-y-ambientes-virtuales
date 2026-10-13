@@ -1,8 +1,8 @@
-# Práctico 01, 02, 03, 04, 05 y 06 — OpenGL, GLSL, la malla indexada, la cámara y la simulación de vuelo (FDM)
+# Práctico 01, 02, 03, 04, 05, 06 y 07 — OpenGL, GLSL, la malla indexada, la cámara, la simulación de vuelo (FDM) y el terreno procedural
 
 **Materia:** Computación gráfica y ambientes virtuales (0494)  
 **Institución:** Centro Regional Universitario Córdoba — IUA  
-**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026; rev. Práctico 05: 18-sep-2026; rev. Práctico 06: 10-oct-2026)
+**Fecha:** 21 de agosto de 2026 (rev. Práctico 02: 28-ago-2026; rev. Práctico 03: 09-sep-2026; rev. Práctico 04: 14-sep-2026; rev. Práctico 05: 18-sep-2026; rev. Práctico 06: 10-oct-2026; rev. Práctico 07: 12-oct-2026)
 
 ---
 
@@ -32,12 +32,20 @@ Proyecto introductorio a OpenGL moderno (4.6 core profile) y GLSL, organizado en
   5000 m y 150 m/s; el teclado pasa por rampas a las posiciones de los mandos
   (`InputHandler: update/controls/set_controls`), y el estado NED del FDM se transforma al
   mundo de la escena con `FlightData::to_world()` (única conversión de referenciales).
+- **Práctico 07:** TERRENO procedural. Una malla N×N se genera por programa con
+  `terrain::build_grid()` (función libre, alturas desacopladas en un `HeightField`), las
+  alturas salen de ruido Perlin/FBm (`NoiseHeights`, semilla fija → determinista), se
+  calculan NORMALES por diferencias centradas, se habilita el back-face culling (el winding
+  se corrige en el generador, NO con `glFrontFace`) y el terreno es ILIMITADO: una VENTANA
+  deslizante (`TerrainWindow`) sigue al avión por el heightmap, moviéndose a saltos de una
+  celda (sin "reptar") y repartiendo el recálculo entre cuadros (sin tirones).
 
 ## Requisitos
 
 - Linux (probado en Ubuntu/Arch) con Mesa/GL driver o Windows (MSYS2/MinGW)
 - Compilador C++17 con soporte para `<filesystem>`
 - Librerías: GLFW3, OpenGL, GLAD (incluido en `third_party/`), GLM (header-only, `/usr/include/glm`)
+  y FastNoiseLite (header-only, incluido en `third_party/`)
 - Make
 
 ## Estructura del proyecto
@@ -49,23 +57,27 @@ ogl-project-template/
 │       ├── triangle.vs / triangle.fs   # Práctico 01 (triángulo)
 │       └── cube.vs / cube.fs           # Prácticos 02-06 (uModel/uView/uProjection/uColor)
 ├── src/
-│   ├── main.cpp                # Práctico 06: game loop de paso fijo + FDM + cámara orbital
-│   ├── main_test.cpp           # Tests de RM + primitives + cámara + FDM/input (C++ puro)
+│   ├── main.cpp                # Práctico 07: game loop de paso fijo + FDM + cámara orbital + terreno
+│   ├── main_test.cpp           # Tests de RM + primitives + cámara + FDM/input + terreno (C++ puro)
 │   └── core/
 │       ├── MeshData.h          # Vertex + MeshData (tupla y malla lado CPU)
 │       ├── ResourceManager.h/.cpp   # Lectura/cacheo de fuentes de shaders
 │       ├── Shader.h/.cpp            # Programa linkeado + set_uniform (DSA, mat4/vec3/vec4)
-│       ├── Mesh.h/.cpp              # VAO/VBO/EBO (RAII, ownership)
+│       ├── Mesh.h/.cpp              # VAO/VBO/EBO (RAII); update_vertices (P07, VBO sin recrear)
 │       ├── Primitives.h/.cpp        # Generador de mallas (cube/cylinder/cone/sphere)
 │       ├── RenderItem.h              # Ítem listo para dibujar (mesh + model + color)
 │       ├── Aircraft.h/.cpp           # Aeronave S-211 (init/update/collect + set_scale)
 │       ├── CameraData.h              # view + projection (estructura compartida)
 │       ├── CameraCommand.h           # deltas de órbita (yaw/pitch/distancia)
-│       ├── CameraSystem.h/.cpp       # Cámara orbital: estado + view + projection
+│       ├── CameraSystem.h/.cpp       # Cámara orbital: estado + view + projection (+set_orbit P07)
 │       ├── InputHandler.h/.cpp       # Mouse + teclado -> CameraCommand y mandos del FDM
-│       └── FlightData.h/.cpp         # NED -> mundo (to_world: única transformación)
+│       ├── FlightData.h/.cpp         # NED -> mundo (to_world: única transformación)
+│       ├── Terrain.h/.cpp            # P07: build_grid + grid_normal + window_origin (C++ puro)
+│       ├── NoiseHeights.h/.cpp       # P07: HeightField de ruido (Perlin/FBm, semilla fija)
+│       └── TerrainWindow.h/.cpp      # P07: ventana deslizante + reconstrucción progresiva
 ├── third_party/
-│   └── glad/                   # Loader de OpenGL (GLAD)
+│   ├── glad/                   # Loader de OpenGL (GLAD)
+│   └── FastNoiseLite/          # P07: ruido procedural, header-only (dependencia del proyecto)
 ├── libs/
 │   └── dlfdm/                  # FDM del Práctico 06 (Makefile.master propio; ver abajo)
 ├── build/                      # Objetos compilados
@@ -98,6 +110,7 @@ make
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
+    -I./third_party/FastNoiseLite \
     libs/dlfdm/src/dlfdm/fdmsolver.cpp \
     libs/dlfdm/src/dlfdm/aerodynamicsmodel.cpp \
     libs/dlfdm/src/dlfdm/aircraftdynamics.cpp \
@@ -107,13 +120,16 @@ g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
     libs/dlfdm/src/dlfdm/models/propulsion/turbojet.cpp \
     src/core/Primitives.cpp src/core/ResourceManager.cpp \
     src/core/CameraSystem.cpp src/core/InputHandler.cpp \
-    src/core/FlightData.cpp src/main_test.cpp -o /tmp/opencode/test_rm \
+    src/core/FlightData.cpp src/core/Terrain.cpp src/core/NoiseHeights.cpp \
+    src/main_test.cpp -o /tmp/opencode/test_rm \
     -lglfw -lpthread
 /tmp/opencode/test_rm
 ```
 
 (`InputHandler.cpp` lee el teclado por GLFW en `update()`, por eso `-lglfw` en el link;
-los 18 tests corren sin ventana ni GPU.)
+los 22 tests corren sin ventana ni GPU. `TerrainWindow.cpp` NO se compila en los tests
+porque usa OpenGL: el terreno se prueba con las funciones puras de `Terrain.cpp`
+(`build_grid`/`grid_normal`/`window_origin`) y `NoiseHeights.cpp`.)
 
 ## Ejecución
 
@@ -123,9 +139,13 @@ make run
 
 Abre una ventana de 800×600 que muestra la aeronave S-211 del Práctico 04 (7 piezas,
 7 colores) volada por el **FDM en la condición de equilibrio (trim)** a 5000 m de altura y
-~150 m/s TAS (~540 km/h), con la cámara orbital del Práctico 05 siguiéndola en la escala
-del mundo en METROS (`CameraSystem` pasó a `near=5`/`far=30000` y distancia de órbita
-[30, 3000]; el modelo del avión, que mide 1, se escala visualmente con `set_scale(9.6)`).
+~150 m/s TAS (~540 km/h), **sobre un terreno procedural** (Práctico 07), con la cámara
+orbital del Práctico 05 siguiéndola en la escala del mundo en METROS (`CameraSystem` usa
+`near=5`/`far=10000` y distancia de órbita [30, 2000]; el modelo del avión, que mide 1, se
+escala visualmente con `set_scale(9.6)`). El terreno está **elevado** a una base de ~4200 m
+(`kTerrainBase`), así que el avión (trim a 5000 m) vuela a **~800 m sobre el suelo** y el
+terreno **llena casi todo el cuadro** en la vista de seguimiento (con la tecla **V** la cámara
+salta a una vista de terreno mirando el origen desde arriba, a la altura del terreno).
 La vista inicial es de "chase" 3/4 a **60 m** (el avión se ve a una talla legible) y el
 zoom del mouse es **proporcional a la distancia** (mismo "paso" de zoom en 60 m que en
 2000 m; todo el rango de órbita se recorre en ~150 px de arrastre).
@@ -140,7 +160,8 @@ Controles:
 | **Q / E** | Pedal izquierdo/derecho → timón (nariz izquierda/derecha) |
 | **W / S** | Subir / bajar potencia (al soltar, vuelve a la del trim) |
 | **P** | Pausa la simulación (la cámara sigue orbitando) |
-| **L** | Alterna wireframe / relleno |
+| **L** | Alterna wireframe / relleno (con el terreno en wireframe se ve la grilla N×N) |
+| **V** | Vista de terreno: reapunta la cámara al **origen del mundo** (a la altura del terreno, mirando hacia abajo) / vuelve a la de chase |
 | `Escape` | Cierra la ventana |
 
 Al **soltar** cualquiera de las teclas de mandos (↑ ↓ ← → Q E W S) el mando **vuelve solo
@@ -149,7 +170,8 @@ rama se afloja hacia la posición de equilibrio (`set_controls(trim.controls)`);
 no queda girando solo con la deflexión retenida.
 
 El pitch de la órbita está acotado a ±0.9·π/2 (no se "tumba" la cámara) y la distancia a
-[30, 3000] metros (no atraviesa el avión ni lo pierde de vista). Al redimensionar la
+[30, 2000] metros (no atraviesa el avión ni lo pierde de vista, y el recorte lejano cae
+siempre dentro de la ventana de terreno, ver Práctico 07). Al redimensionar la
 ventana, la proyección se recalcula con el nuevo aspect (el círculo sigue siendo
 círculo) y si se minimiza (alto 0) el aspect se protege sin dividir por cero.
 
@@ -331,6 +353,172 @@ p_prev = p_cur;
   del acumulador; al soltar la ventana la simulación continúa sin saltos.
 - **Comando discreto una vez por pulsación**: la detección de borde (P, L) alterna una
   sola vez aunque se sostenga la tecla.
+
+## Práctico 07 — Los cambios
+
+### Objetivo
+
+Sobre la escena del P06 (FDM + cámara orbital) se agrega un **terreno procedural**: una
+malla poligonal N×N generada por programa a partir de una **función altura** (ruido), con
+**normales** calculadas, **back-face culling** y comportamiento de terreno **ilimitado**
+mediante una **ventana deslizante**. Se documenta también el tamaño del mundo elegido y el
+comportamiento del borde.
+
+### La malla es una función libre (`terrain::build_grid`)
+
+`src/core/Terrain.h/.cpp` — C++ puro, **sin OpenGL ni ruido**: testeable sin GPU.
+
+- **Topología**: para `celdas = N`, `(N+1)²` vértices en orden **fila-mayor**
+  (`idx(i,j) = i·(N+1) + j`, con `i` = fila = z y `j` = columna = x) y `6·N²` índices
+  (dos triángulos por celda: `(a,d,c)` y `(a,c,b)`, con
+  `a=(i,j), b=(i,j+1), d=(i+1,j), c=(i+1,j+1)`). El bucle de vértices recorre `fila = N+1`
+  con `<= N` y el de celdas recorre `< N` (por eso los vértices por lado son `N+1`).
+- **Posición LOCAL**: `(j·paso, h(ox+j, oz+i), i·paso)`. El origen `(ox, oz)` NO entra en los
+  vértices: se aplica con la **matriz de modelo** (traslación). Así el mundo es infinito y
+  la malla es una **ventana** sobre los índices enteros del heightmap.
+- **Alturas desacopladas de la malla**: `build_grid` recibe un `HeightField` (interfaz
+  `float operator()(int nx, int nz)`) y lo evalúa en los **NODOS** del mundo. Ni la malla
+  sabe de dónde salen las alturas, ni la fuente sabe de la malla: cambiar el ruido por un
+  archivo o una función analítica no toca `build_grid`, y viceversa.
+- **`tex_coords`** normalizadas `(j/N, i/N)` (dejadas para una futura textura; hoy el color
+  es un **uniform plano**, sin iluminación).
+
+### La fuente de alturas (`terrain::NoiseHeights`)
+
+`FastNoiseLite` (header-only, en `third_party/FastNoiseLite`) implementa `HeightField`:
+
+- Ruido **Perlin** con **FBm de 5 octavas** (gain 0.5, lacunarity 2.0): una sola octava es
+  demasiado lisa; sumando octavas el relieve tiene rugosidad a varias escalas.
+  `h = amplitud · GetNoise(nx, nz)`: la amplitud es el tope NOMINAL (`|h| ≤ amplitud`), pero
+  una ventana concreta no llega al extremo (con amplitud 800 m el rango medido fue
+  ~[-600, 520] m).
+- **Semilla fija** (`kTerrainSeed = 1337`): el terreno es **determinista** (misma semilla →
+  mismas alturas), lo que lo hace reproducible y testeable.
+- La **frecuencia** se expresa en "ciclos por nodo": `0.01` → una loma ocupa ~100 celdas
+  (~3 km con paso 30 m).
+- **Elevación base** (`base`, parámetro del constructor, default `0`): `y = base + amplitud ·
+  GetNoise(nx, nz)`. Es un simple **desplazamiento vertical** del mundo — no cambia el relieve
+  ni las normales (la base se cancela en las diferencias centradas) ni la continuidad entre
+  ventanas. Se usa para **acercar el terreno al avión sin tocar el FDM**: el FDM vuela en el
+  **trim exacto de 5000 m** (bajar el avión rompería el equilibrio), así que en vez de eso se
+  sube el terreno con `kTerrainBase = 4200 m`; el avión queda a ~800 m del suelo medio y a
+  ~300 m de las cumbres. Es **tuneable**: con `kTerrainBase` más alto el suelo queda aún más
+  cerca; con uno más bajo (p. ej. 3000 m) reaparece algo de **cielo** en la parte alta del
+  cuadro. Con 4200 m el terreno cubre casi todo el cuadro.
+
+### Las normales (`terrain::grid_normal`)
+
+Por **diferencias centradas** sobre la grilla de alturas ya muestreada:
+
+```
+n = normalize( vec3( h(i,j−1) − h(i,j+1),  2·paso,  h(i−1,j) − h(i+1,j) ) )
+```
+
+- El término `2·paso > 0` en `y` garantiza que la normal apunta **hacia arriba**.
+- En el **borde** de la ventana el índice del vecino se **clampea** a `[0, N]`: la diferencia
+  es a un solo lado y la normal queda **definida y nunca nula** (no hace falta "vecino
+  fantasma").
+- Todavía **no hay iluminación**: las normales no se ven en la escena (el color es plano).
+  El complemento visual es el **modo de depuración de normales** de `cube.fs` (ver P03) y el
+  numérico, los Tests 20 y 22.
+- `grid_normal` se expone aparte porque la ventana deslizante recalcula los vértices de a
+  poco y debe usar EXACTAMENTE la misma fórmula que `build_grid`.
+
+### Culling: `glEnable(GL_CULL_FACE)` y el WINDING en el generador
+
+`main.cpp` habilita `glEnable(GL_DEPTH_TEST)` (ya estaba) y `glEnable(GL_CULL_FACE)`. Con los
+valores por defecto (`glCullFace(GL_BACK)` + `glFrontFace(GL_CCW)`) se descartan los
+triángulos vistos por su cara de atrás: **desde abajo del terreno no se dibuja nada** (se ve
+el color de fondo).
+
+El orden de los índices se eligió para que la normal geométrica `(B−A)×(C−A)` apunte a **+Y
+en todos los triángulos** (Test 19), así el culling dibuja la cara de **arriba**. Este es el
+punto de la consigna: se corrigió el **winding en el generador de la malla**, NO se usó
+`glFrontFace` para "parchear" el pipeline.
+
+### Tamaño del mundo y comportamiento del borde (decisión)
+
+- La malla es una ventana de `kTerrainCells = 1000` celdas de `kTerrainSpacing = 30 m` →
+  **30×30 km** (radio 15 km), en **metros** (la unidad del P06):
+  `(N+1)² = 1001² = 1.002.001` vértices y `6·N² = 6.000.000` índices (~32 MB de VBO).
+  El relieve medido con la semilla 1337 es de unos **[-553, 485] m**; con la **elevación base**
+  `kTerrainBase = 4200 m` (`y = base + relieve`) el mundo queda en **~[3650, 4685] m**, esto es,
+  a ~300 m de las cumbres del avión que vuela en el trim de 5000 m (ver `NoiseHeights`).
+- **El borde NO se ve: no hay regla de borde porque el terreno es infinito de verdad.** La
+  ventana se desliza sobre el heightmap y el recorte de la proyección corta antes que el
+  borde de la malla: con `far = 10000 m` y la órbita acotada a `kMaxDist = 2000 m`, lo más
+  lejano visible (≤ ~9 km horizontales) cae cómodo dentro del radio de 15 km. Por eso la
+  proyección se ajustó a `far = 10000` (ver `CameraSystem`).
+
+### Terreno ilimitado: la ventana deslizante (`TerrainWindow`)
+
+`src/core/TerrainWindow.h/.cpp` posee el `Mesh` (más los buffers de staging `MeshData` y una
+grilla de alturas `H_`). No conoce cámara ni FDM: solo recibe el punto `(x,z)` sobre el que
+centrarse.
+
+- **Origen "encajado" a la celda** (`terrain::window_origin`):
+  `ox = round(x/paso) − N/2`. Redondear a entero evita el **"repteo" (crawling)**: si el
+  origen siguiera a la cámara de forma continua, los vértices caerían entre nodos y la
+  superficie parecería arrastrarse/cambiar de forma. Moviéndose a **saltos de una celda**, la
+  ventana siempre coincide con nodos reales y el terreno "pasa por abajo" idéntico a sí mismo.
+- **Posiciones locales + `model = translate(ox·paso, 0, oz·paso)`**: al recentrar solo cambian
+  las ALTURAS/NORMALES del VBO, nunca la topología (los índices se arman UNA vez, igual que
+  en `build_grid`).
+- **El problema (no obvio)**: recalcular la ventana entera de una vez cuesta ~78 ms (medido,
+  para 800²) → varios cuadros congelados cada vez que el avión cruza una celda. Inaceptable.
+- **La solución — reconstrucción progresiva**: la ventana solo se recentra cuando el objetivo
+  se aleja más de `kMargenCeldas = 40` celdas (~1,2 km) del centro, y el recálculo se
+  **reparte entre cuadros** con un presupuesto (`presupuesto_ = 12000` muestras/cuadro,
+  ~1 ms):
+  - fase `kHeights`: llena `H_` (lo caro: 1 `GetNoise` por nodo);
+  - fase `kVertices`: arma posición/normal/tex del `MeshData` desde `H_` (barato);
+  - fase `kIdle`: no hace nada.
+  Mientras se reconstruye se sigue dibujando la ventana VIEJA; recién cuando la nueva está
+  **completa** se sube con **UN** `glNamedBufferSubData` (`Mesh::update_vertices`, que
+  reescribe el VBO sin recrear el VAO/EBO) y se cambia el origen → **sin costura a medio
+  armar, sin titileo y sin "reptar"**. Un recentrado completo tarda
+  ~`1.002.001 / 12000` ≈ 84 cuadros (~1,4 s a 60 fps); el avión tarda ~8 s en recorrer
+  1,2 km, así que sobra tiempo. (Se descartaron: recalcular todo en el cruce, `memmove` 2D
+  de la grilla y doble buffer; ver el header de `TerrainWindow`.)
+- La ventana **sigue al objetivo de la cámara**: en chase, la posición del avión; con V, el
+  origen del mundo.
+
+### `main.cpp` y `CameraSystem`
+
+- Init (con el contexto GL vivo): `terrain::NoiseHeights alturas(kTerrainSeed, kTerrainFreq,
+  kTerrainAmplitud, 5, kTerrainBase)` + `TerrainWindow terreno; terreno.init(kTerrainCells,
+  kTerrainSpacing, alturas, pos0.x, pos0.z)` — arma la topología UNA vez, genera la primera
+  ventana de forma sincrónica, la sube e imprime el rango de alturas muestreado.
+- Por cuadro: `terreno.update(objetivo.x, objetivo.z)` con `objetivo` = posición del avión (o
+  el origen si `terreno_view`); el retorno indica si la malla cambió de origen (se loguea
+  `[terreno] ventana recentrada a (ox, oz)`).
+- El terreno entra como **una pieza más**: `items.push_back({terreno.mesh(), terreno.model(),
+  kTerrainColor})` **después** de `avion.collect(items)` (porque `collect()` limpia el
+  vector) y se dibuja con el mismo `glDrawElements`.
+- Tecla **V** (evento, por flanco): alterna la "vista de terreno" (reapunta al **origen a la
+  altura del terreno** — `(0, alturas(0,0), 0)`, no `y = 0`, porque el mundo está elevado) y
+  salta a una pose de órbita útil con `CameraSystem::set_orbit(...)` (2000 m mirando hacia
+  abajo, pitch 40°), volviendo a la de chase (60 m, 25°) al salir.
+
+### Verificación (los cinco chequeos de "¿cómo sé que está bien?")
+
+1. **La malla es N×N**: `(N+1)²` vértices y `6·N²` índices, con posiciones locales
+   `j·paso`/`i·paso` y `tex_coords` normalizadas → **Test 19**. En la app, **L** (wireframe)
+   muestra la grilla de triángulos del terreno.
+2. **Las normales están bien**: en un plano inclinado la normal (diferencias centradas)
+   coincide con la analítica, y en el borde sigue siendo **unitaria y hacia arriba** (nunca
+   nula) → **Tests 20 y 22**. Visualmente, el **modo de depuración de normales** de `cube.fs`
+   pinta el relieve con un degradé suave (dirección de la normal ↔ color).
+3. **El culling descarta la cara de abajo**: `(B−A)×(C−A).y > 0` en TODOS los triángulos
+   → **Test 19**; desde abajo del terreno no se ve la superficie (verificado con capturas:
+   sin culling el 100 % del cuadro es terreno desde abajo, con culling queda un residuo de
+   ~0,4 % de triángulos muy parados — se descarta el **99,6 %**).
+4. **El terreno es continuo (ilimitado)**: un mismo nodo del mundo da la MISMA altura y la
+   MISMA posición mundial en dos ventanas corridas una celda (no hay costura ni "escalón"
+   entre ventanas) → **Test 22**.
+5. **La ventana se desliza sin reptar ni tirones**: `window_origin` no se mueve dentro de una
+   celda y salta 1 nodo al cruzarla → **Test 21**; en la app, el log de recentrado aparece
+   cada ~1,2 km (~8 s) y el relieve es determinista y acotado (misma semilla → mismo terreno).
 
 ## Práctico 05 — Los cambios
 
@@ -688,6 +876,7 @@ El archivo `src/main_test.cpp` verifica:
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
+    -I./third_party/FastNoiseLite \
     libs/dlfdm/src/dlfdm/fdmsolver.cpp \
     libs/dlfdm/src/dlfdm/aerodynamicsmodel.cpp \
     libs/dlfdm/src/dlfdm/aircraftdynamics.cpp \
@@ -697,9 +886,10 @@ g++ -std=c++17 -Wall -Wextra -I./libs/dlfdm/include \
     libs/dlfdm/src/dlfdm/models/propulsion/turbojet.cpp \
     src/core/Primitives.cpp src/core/ResourceManager.cpp \
     src/core/CameraSystem.cpp src/core/InputHandler.cpp \
-    src/core/FlightData.cpp src/main_test.cpp -o /tmp/opencode/test_rm \
+    src/core/FlightData.cpp src/core/Terrain.cpp src/core/NoiseHeights.cpp \
+    src/main_test.cpp -o /tmp/opencode/test_rm \
     -lglfw -lpthread
-/tmp/opencode/test_rm        # 18 tests
+/tmp/opencode/test_rm        # 22 tests
 make
 ```
 

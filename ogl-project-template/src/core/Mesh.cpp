@@ -128,3 +128,17 @@ void Mesh::load(const MeshData& data)
                                   ? data.vertices.size()
                                   : data.indices.size());
 }
+
+// ---------------------------------------------------------------------------
+// update_vertices: reescribe el contenido del VBO SIN recrear los objetos ni
+// tocar el VAO/EBO. Pensado para mallas cuya topología (índices) es fija pero
+// cuyos vértices cambian (ventana de terreno). Asume que el tamaño no cambia:
+// se sube a partir del byte 0 y con la misma cantidad de vértices que en load().
+// ---------------------------------------------------------------------------
+void Mesh::update_vertices(const std::vector<Vertex>& vertices)
+{
+    if (vbo_ == 0U || vertices.empty()) return;
+    glNamedBufferSubData(vbo_, 0,
+        static_cast<GLsizeiptr>(vertices.size() * sizeof(Vertex)),
+        vertices.data());
+}

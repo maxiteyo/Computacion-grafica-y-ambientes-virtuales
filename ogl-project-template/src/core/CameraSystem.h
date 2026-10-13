@@ -32,6 +32,13 @@
 // el avión) y la distancia inicial sigue al avión de cerca (60 m) para que la
 // aeronave (~9.6 m con set_scale) se vea a una talla legible en la vista de
 // "chase". El zoom del mouse es proporcional a la distancia (InputHandler).
+//
+// Práctico 07: entra el terreno procedural con una VENTANA deslizante de radio
+// ~10 km (800 celdas × 25 m = 20×20 km). Para que NUNCA se vea el borde de la
+// malla, el recorte lejano debe caer dentro de la ventana: se baja kFar a 6000 m
+// (alcanza para ver el suelo 5000 m abajo y unos km de relieve) y kMaxDist a
+// 2000 m, de modo que lo más lejano visible desde el centro de la ventana quede
+// a far + distancia (8 km) < radio (10 km), aun con el margen de recentrado.
 // ============================================================================
 #pragma once
 
@@ -70,6 +77,13 @@ public:
     // proporcional (la ganancia se escala con la distancia).
     float distance() const { return distancia_; }
 
+    // Reajusta la órbita de una vez (yaw/pitch en radianes, distancia en m),
+    // aplicando los mismos clamps que update(). Sirve para SALTAR a una vista
+    // predefinida sin esperar a que el usuario orbite con el mouse (Práctico 07:
+    // la "vista de terreno" reapunta al origen con una pose que mira el relieve
+    // desde arriba). No toca la proyección.
+    void set_orbit(float yaw, float pitch, float dist);
+
 private:
     void rebuild_projection();
     void rebuild_view(const glm::vec3& objetivo);
@@ -78,11 +92,17 @@ private:
     // (Práctico 06: el FDM trabaja en metros, altitud 5000 m).
     static constexpr float kFovYDeg  = 45.0f;  // ángulo de visión vertical θv
     static constexpr float kNear     = 5.0f;   // no "muy chico" (precisión de Z)
-    static constexpr float kFar      = 30000.0f;  // cubre el vuelo + el suelo
+    // Práctico 07: el avión vuela a 5000 m, así que el suelo queda 5 km abajo y
+    // solo entra en el cuadro mirando hacia abajo. Con far = 10 km el terreno
+    // aparece como una franja en la parte baja (y el borde lejano del recorte
+    // cae DENTRO de la ventana de 30 km: nunca se ve el borde de la malla).
+    static constexpr float kFar      = 10000.0f;
     // Clamps de la órbita (preguntas de la consigna, ver header).
     static constexpr float kPitchLimit = 0.9f; // en múltiplos de π/2 (±81°)
     static constexpr float kMinDist = 30.0f;
-    static constexpr float kMaxDist = 3000.0f;
+    // Práctico 07: distancia máx. de órbita acotada para que lo más lejano
+    // visible (far + corrimiento de la cámara) siga cayendo dentro de la ventana.
+    static constexpr float kMaxDist = 2000.0f;
 
     // Órbita inicial: vista de "chase" 3/4 atrás-arriba, a 60 m del avión
     // (con el zoom proporcional del mouse se ajusta en ~30 px de arrastre).

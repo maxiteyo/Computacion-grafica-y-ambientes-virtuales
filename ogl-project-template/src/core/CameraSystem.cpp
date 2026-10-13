@@ -33,6 +33,17 @@ void CameraSystem::update(const glm::vec3& objetivo,
     rebuild_view(objetivo);
 }
 
+void CameraSystem::set_orbit(float yaw, float pitch, float dist)
+{
+    // Mismos clamps que update(): el estado nunca sale del rango válido. No se
+    // rearma la vista acá porque no se conoce el objetivo; la próxima llamada a
+    // update() (en el mismo cuadro) la reconstruye con el objetivo correcto.
+    yaw_ = yaw;
+    pitch_ = std::clamp(pitch, -glm::radians(0.9f * 90.0f),
+                        glm::radians(0.9f * 90.0f));
+    distancia_ = std::clamp(dist, kMinDist, kMaxDist);
+}
+
 void CameraSystem::set_viewport(int width, int height)
 {
     // Ventana minimizada: GLFW puede reportar 0 (o incluso negativo) de alto.

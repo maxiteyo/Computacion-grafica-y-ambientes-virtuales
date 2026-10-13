@@ -32,6 +32,11 @@ public:
     // Sube los datos a la GPU y arma el VAO/VBO/EBO (debemos tener contexto GL).
     void load(const MeshData& data);
 
+    // Re-sube SOLO los vértices (debe tener el MISMO tamaño que en load) sin
+    // tocar índices ni VAO: para mallas que se regeneran en el CPU manteniendo la
+    // topología (la ventana de terreno del Práctico 07). Requiere contexto GL.
+    void update_vertices(const std::vector<Vertex>& vertices);
+
     // Libera los objetos de GPU. Llamable dos veces: no rompe nada.
     void clear(void);
 
